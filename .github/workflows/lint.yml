@@ -23,3 +23,4 @@ jobs:
         with:
           version: v1.52.2
           args: run ./...
+        working-directory: ./GoScanRentalTide
