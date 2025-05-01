@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
 	"regexp"
 	"runtime"
 	"strings"
@@ -31,6 +34,25 @@ type LicenseData struct {
 	Sex           string `json:"sex"`
 	LicenseClass  string `json:"licenseClass"`
 	Dob           string `json:"dob"`
+}
+
+// ReceiptData represents the data structure for a receipt
+type ReceiptData struct {
+	TransactionID     string                                           `json:"transactionId"`
+	Items             []map[string]interface{}                         `json:"items"`
+	Subtotal          float64                                          `json:"subtotal"`
+	Tax               float64                                          `json:"tax"`
+	Total             float64                                          `json:"total"`
+	Tip               *float64                                         `json:"tip,omitempty"`
+	CustomerName      *string                                          `json:"customerName,omitempty"`
+	Date              string                                           `json:"date"`
+	Location          interface{}                                      `json:"location"`
+	PaymentType       string                                           `json:"paymentType"`
+	RefundAmount      *float64                                         `json:"refundAmount,omitempty"`
+	DiscountAmount    *float64                                         `json:"discountAmount,omitempty"`
+	DiscountPercentage *float64                                        `json:"discountPercentage,omitempty"`
+	CashGiven         *float64                                         `json:"cashGiven,omitempty"`
+	ChangeDue         *float64                                         `json:"changeDue,omitempty"`
 }
 
 // parse and struct
@@ -267,7 +289,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// For development, allow all origins. Adjust as needed.
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			return
@@ -301,9 +323,282 @@ func scannerHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// generateReceiptHTML creates HTML content for the receipt
+func generateReceiptHTML(receipt ReceiptData) string {
+	locationName := ""
+	switch loc := receipt.Location.(type) {
+	case string:
+		locationName = loc
+	case map[string]interface{}:
+		if name, ok := loc["name"].(string); ok {
+			locationName = name
+		}
+	}
+
+	// Start building the HTML content
+	html := `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Receipt</title>
+  <style>
+    @page {
+      margin: 0.5cm;
+      size: 80mm auto;  /* Receipt paper size */
+    }
+    body {
+      font-family: 'Arial', sans-serif;
+      margin: 0;
+      padding: 10px;
+      font-size: 10pt;
+      width: 80mm;  /* Receipt width */
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 10px;
+    }
+    .business-name {
+      font-weight: bold;
+      font-size: 12pt;
+    }
+    .divider {
+      border-bottom: 1px dashed #ccc;
+      margin: 10px 0;
+    }
+    .item {
+      margin-bottom: 5px;
+    }
+    .item-name {
+      font-weight: bold;
+    }
+    .item-details {
+      display: flex;
+      justify-content: space-between;
+      margin-left: 10px;
+    }
+    .total-section {
+      margin-top: 10px;
+      font-weight: bold;
+    }
+    .footer {
+      text-align: center;
+      margin-top: 15px;
+      font-size: 9pt;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="business-name">` + locationName + `</div>
+    <div class="date">` + receipt.Date + `</div>`
+
+	if receipt.CustomerName != nil {
+		html += `    <div class="customer">Customer: ` + *receipt.CustomerName + `</div>`
+	}
+
+	html += `  </div>
+
+  <div class="divider"></div>
+  
+  <div class="transaction-info">
+    <div>Transaction ID: ` + receipt.TransactionID + `</div>
+    <div>Payment: ` + strings.Title(receipt.PaymentType) + `</div>
+  </div>
+  
+  <div class="divider"></div>
+  
+  <div class="items-section">
+    <div style="font-weight: bold; margin-bottom: 5px;">ITEMS</div>`
+
+	// Add items
+	for _, item := range receipt.Items {
+		name, _ := item["name"].(string)
+		quantity, _ := item["quantity"].(float64)
+		price, _ := item["price"].(float64)
+		sku, _ := item["sku"].(string)
+
+		html += fmt.Sprintf(`
+    <div class="item">
+      <div class="item-name">%s</div>
+      <div class="item-details">
+        <div>%.0f x $%.2f</div>
+        <div>$%.2f</div>
+      </div>`, name, quantity, price, quantity*price)
+
+		if sku != "" {
+			html += fmt.Sprintf(`
+      <div style="margin-left: 10px; font-size: 8pt;">SKU: %s</div>`, sku)
+		}
+
+		html += `
+    </div>`
+	}
+
+	html += `
+  </div>
+  
+  <div class="divider"></div>
+  
+  <div class="totals-section">
+    <div style="display: flex; justify-content: space-between;">
+      <div>Subtotal:</div>
+      <div>$` + fmt.Sprintf("%.2f", receipt.Subtotal) + `</div>
+    </div>`
+
+	// Add discount if applicable
+	if receipt.DiscountAmount != nil && receipt.DiscountPercentage != nil {
+		html += fmt.Sprintf(`
+    <div style="display: flex; justify-content: space-between;">
+      <div>Discount (%.0f%%):</div>
+      <div>-$%.2f</div>
+    </div>`, *receipt.DiscountPercentage, *receipt.DiscountAmount)
+	}
+
+	// Add tax
+	html += `
+    <div style="display: flex; justify-content: space-between;">
+      <div>Tax:</div>
+      <div>$` + fmt.Sprintf("%.2f", receipt.Tax) + `</div>
+    </div>
+    <div style="margin-left: 10px; font-size: 8pt;">
+      <div>GST (5%): $` + fmt.Sprintf("%.2f", receipt.Subtotal*0.05) + `</div>
+      <div>PST (7%): $` + fmt.Sprintf("%.2f", receipt.Subtotal*0.07) + `</div>
+    </div>`
+
+	// Add refund if applicable
+	if receipt.RefundAmount != nil && *receipt.RefundAmount > 0 {
+		html += fmt.Sprintf(`
+    <div style="display: flex; justify-content: space-between;">
+      <div>Refund:</div>
+      <div>-$%.2f</div>
+    </div>`, *receipt.RefundAmount)
+	}
+
+	// Add tip if applicable
+	if receipt.Tip != nil && *receipt.Tip > 0 {
+		html += fmt.Sprintf(`
+    <div style="display: flex; justify-content: space-between;">
+      <div>Tip:</div>
+      <div>$%.2f</div>
+    </div>`, *receipt.Tip)
+	}
+
+	// Total
+	html += `
+    <div style="display: flex; justify-content: space-between; margin-top: 10px; padding: 5px; background-color: #f5f5f5; font-weight: bold;">
+      <div>TOTAL:</div>
+      <div>$` + fmt.Sprintf("%.2f", receipt.Total) + `</div>
+    </div>`
+
+	// Cash payment details if applicable
+	if receipt.PaymentType == "cash" && receipt.CashGiven != nil && receipt.ChangeDue != nil {
+		html += fmt.Sprintf(`
+    <div style="margin-top: 10px; padding: 5px; background-color: #f8f8f8;">
+      <div style="display: flex; justify-content: space-between;">
+        <div>Cash:</div>
+        <div>$%.2f</div>
+      </div>
+      <div style="display: flex; justify-content: space-between;">
+        <div>Change:</div>
+        <div>$%.2f</div>
+      </div>
+    </div>`, *receipt.CashGiven, *receipt.ChangeDue)
+	}
+
+	// Footer
+	html += `
+  </div>
+  
+  <div class="divider"></div>
+  
+  <div class="footer">
+    <div style="font-weight: bold;">Thank you for your purchase!</div>
+    <div style="margin-top: 5px;">Visit us again at ` + locationName + `</div>
+  </div>
+</body>
+</html>`
+
+	return html
+}
+
+// printReceipt uses system commands to send HTML content to the default printer
+func printReceipt(html string) error {
+	// Create a temporary HTML file
+	tmpFile, err := ioutil.TempFile("", "receipt-*.html")
+	if err != nil {
+		return fmt.Errorf("error creating temp file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	// Write the HTML content to the temp file
+	if _, err := tmpFile.Write([]byte(html)); err != nil {
+		return fmt.Errorf("error writing to temp file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("error closing temp file: %w", err)
+	}
+
+	// Print the file using the operating system's default printer
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		// On Windows, use the built-in print command
+		cmd = exec.Command("cmd", "/C", "start", "/B", "msedge", "--kiosk-printing", tmpFile.Name())
+	case "darwin":
+		// On macOS, use lp command
+		cmd = exec.Command("lp", tmpFile.Name())
+	default:
+		// On Linux, use lp command
+		cmd = exec.Command("lp", tmpFile.Name())
+	}
+
+	// Execute the print command
+	var outputBuf, errorBuf bytes.Buffer
+	cmd.Stdout = &outputBuf
+	cmd.Stderr = &errorBuf
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("error printing receipt: %w, stderr: %s", err, errorBuf.String())
+	}
+
+	return nil
+}
+
+// handlePrintReceipt processes print requests
+func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
+	// Only accept POST requests
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, errors.New("only POST method is allowed"))
+		return
+	}
+
+	// Decode the request body
+	var receipt ReceiptData
+	if err := json.NewDecoder(r.Body).Decode(&receipt); err != nil {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
+		return
+	}
+
+	// Generate HTML for the receipt
+	html := generateReceiptHTML(receipt)
+
+	// Print the receipt
+	if err := printReceipt(html); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	// Return success response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "success",
+		"message": "Receipt printed successfully",
+	})
+}
+
 func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/scanner/scan", scannerHandler)
+	mux.HandleFunc("/print/receipt", handlePrintReceipt)  // New endpoint for printing
 
 	handler := corsMiddleware(mux)
 	port := 3500 // change port will break front end so don't
