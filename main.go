@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -38,21 +39,21 @@ type LicenseData struct {
 
 // ReceiptData represents the data structure for a receipt
 type ReceiptData struct {
-	TransactionID     string                                           `json:"transactionId"`
-	Items             []map[string]interface{}                         `json:"items"`
-	Subtotal          float64                                          `json:"subtotal"`
-	Tax               float64                                          `json:"tax"`
-	Total             float64                                          `json:"total"`
-	Tip               *float64                                         `json:"tip,omitempty"`
-	CustomerName      *string                                          `json:"customerName,omitempty"`
-	Date              string                                           `json:"date"`
-	Location          interface{}                                      `json:"location"`
-	PaymentType       string                                           `json:"paymentType"`
-	RefundAmount      *float64                                         `json:"refundAmount,omitempty"`
-	DiscountAmount    *float64                                         `json:"discountAmount,omitempty"`
-	DiscountPercentage *float64                                        `json:"discountPercentage,omitempty"`
-	CashGiven         *float64                                         `json:"cashGiven,omitempty"`
-	ChangeDue         *float64                                         `json:"changeDue,omitempty"`
+	TransactionID      string                   `json:"transactionId"`
+	Items              []map[string]interface{} `json:"items"`
+	Subtotal           float64                  `json:"subtotal"`
+	Tax                float64                  `json:"tax"`
+	Total              float64                  `json:"total"`
+	Tip                *float64                 `json:"tip,omitempty"`
+	CustomerName       *string                  `json:"customerName,omitempty"`
+	Date               string                   `json:"date"`
+	Location           interface{}              `json:"location"`
+	PaymentType        string                   `json:"paymentType"`
+	RefundAmount       *float64                 `json:"refundAmount,omitempty"`
+	DiscountAmount     *float64                 `json:"discountAmount,omitempty"`
+	DiscountPercentage *float64                 `json:"discountPercentage,omitempty"`
+	CashGiven          *float64                 `json:"cashGiven,omitempty"`
+	ChangeDue          *float64                 `json:"changeDue,omitempty"`
 }
 
 // parse and struct
@@ -523,33 +524,71 @@ func generateReceiptHTML(receipt ReceiptData) string {
 
 // printReceipt uses system commands to send HTML content to the default printer
 func printReceipt(html string) error {
-	// Create a temporary HTML file
-	tmpFile, err := ioutil.TempFile("", "receipt-*.html")
-	if err != nil {
-		return fmt.Errorf("error creating temp file: %w", err)
-	}
-	defer os.Remove(tmpFile.Name())
+	// Path for the temporary file - using a different approach for Windows
+	var tmpFilePath string
 
-	// Write the HTML content to the temp file
-	if _, err := tmpFile.Write([]byte(html)); err != nil {
-		return fmt.Errorf("error writing to temp file: %w", err)
+	if runtime.GOOS == "windows" {
+		// On Windows, create the temp file in a reliable location
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("error getting user home directory: %w", err)
+		}
+		// Create a subfolder for our app if it doesn't exist
+		receiptsDir := filepath.Join(homeDir, "ReceiptPrinter")
+		if _, err := os.Stat(receiptsDir); os.IsNotExist(err) {
+			if err := os.Mkdir(receiptsDir, 0755); err != nil {
+				return fmt.Errorf("error creating receipts directory: %w", err)
+			}
+		}
+		// Use a timestamp to avoid conflicts
+		timestamp := time.Now().Format("20060102150405")
+		tmpFilePath = filepath.Join(receiptsDir, fmt.Sprintf("receipt-%s.html", timestamp))
+		
+		// Write the HTML to the file
+		err = ioutil.WriteFile(tmpFilePath, []byte(html), 0644)
+		if err != nil {
+			return fmt.Errorf("error writing to temp file: %w", err)
+		}
+	} else {
+		// For non-Windows systems, use the default temp file approach
+		tmpFile, err := ioutil.TempFile("", "receipt-*.html")
+		if err != nil {
+			return fmt.Errorf("error creating temp file: %w", err)
+		}
+		tmpFilePath = tmpFile.Name()
+		
+		// Write the HTML content to the temp file
+		if _, err := tmpFile.Write([]byte(html)); err != nil {
+			tmpFile.Close()
+			os.Remove(tmpFilePath)
+			return fmt.Errorf("error writing to temp file: %w", err)
+		}
+		if err := tmpFile.Close(); err != nil {
+			os.Remove(tmpFilePath)
+			return fmt.Errorf("error closing temp file: %w", err)
+		}
 	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("error closing temp file: %w", err)
+
+	// Create a deferred cleanup to remove the temp file after printing
+	defer os.Remove(tmpFilePath)
+
+	// Verify the file exists before trying to print
+	if _, err := os.Stat(tmpFilePath); os.IsNotExist(err) {
+		return fmt.Errorf("temp file does not exist at path: %s", tmpFilePath)
 	}
 
 	// Print the file using the operating system's default printer
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		// On Windows, use the built-in print command
-		cmd = exec.Command("cmd", "/C", "start", "/B", "msedge", "--kiosk-printing", tmpFile.Name())
+		// On Windows, use msedge with kiosk-printing mode
+		cmd = exec.Command("cmd", "/C", "start", "/wait", "msedge", "--kiosk-printing", tmpFilePath)
 	case "darwin":
 		// On macOS, use lp command
-		cmd = exec.Command("lp", tmpFile.Name())
+		cmd = exec.Command("lp", tmpFilePath)
 	default:
 		// On Linux, use lp command
-		cmd = exec.Command("lp", tmpFile.Name())
+		cmd = exec.Command("lp", tmpFilePath)
 	}
 
 	// Execute the print command
@@ -559,6 +598,9 @@ func printReceipt(html string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("error printing receipt: %w, stderr: %s", err, errorBuf.String())
 	}
+
+	// Add a small delay to ensure the print job is sent before we delete the file
+	time.Sleep(2 * time.Second)
 
 	return nil
 }
@@ -598,7 +640,7 @@ func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
 func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/scanner/scan", scannerHandler)
-	mux.HandleFunc("/print/receipt", handlePrintReceipt)  // New endpoint for printing
+	mux.HandleFunc("/print/receipt", handlePrintReceipt) // New endpoint for printing
 
 	handler := corsMiddleware(mux)
 	port := 3500 // change port will break front end so don't
