@@ -581,8 +581,28 @@ func printReceipt(html string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		// On Windows, use msedge with kiosk-printing mode
-		cmd = exec.Command("cmd", "/C", "start", "/wait", "msedge", "--kiosk-printing", tmpFilePath)
+		// On Windows, use SumatraPDF with silent print option
+		// First, check if SumatraPDF is installed
+		sumatra := `C:\Program Files\SumatraPDF\SumatraPDF.exe`
+		if _, err := os.Stat(sumatra); os.IsNotExist(err) {
+			// If SumatraPDF is not available, try using Microsoft Print to PDF with PowerShell
+			printScript := fmt.Sprintf(`$printer = Get-WmiObject -Query "SELECT * FROM Win32_Printer WHERE Default=$true"
+$printProcess = New-Object -ComObject "Shell.Application"
+$printProcess.ShellExecute("%s", "", "", "print", 0`, tmpFilePath)
+			
+			// Create a temporary PowerShell script
+			psFile := filepath.Join(filepath.Dir(tmpFilePath), "print-"+filepath.Base(tmpFilePath)+".ps1")
+			if err := ioutil.WriteFile(psFile, []byte(printScript), 0644); err != nil {
+				return fmt.Errorf("error creating PowerShell script: %w", err)
+			}
+			defer os.Remove(psFile)
+			
+			// Execute the PowerShell script
+			cmd = exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-File", psFile)
+		} else {
+			// Use SumatraPDF in silent print mode
+			cmd = exec.Command(sumatra, "-print-to-default", "-silent", tmpFilePath)
+		}
 	case "darwin":
 		// On macOS, use lp command
 		cmd = exec.Command("lp", tmpFilePath)
