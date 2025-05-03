@@ -530,86 +530,122 @@ func generateReceiptHTML(receipt ReceiptData) string {
 
 // printReceipt uses system commands to send HTML content to the default printer
 func printReceipt(html string) error {
-	// Set up logging for the function
-	log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
-	
-	// Path for the temporary file
-	var tmpFilePath string
+    log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
+    
+    var tmpFilePath string
 
-	if runtime.GOOS == "windows" {
-		// Create temp file in the system temp directory which should be writable
-		tmpFile, err := ioutil.TempFile(os.TempDir(), "receipt-*.html")
-		if err != nil {
-			log.Printf("ERROR: Failed to create temp file: %v", err)
-			return fmt.Errorf("error creating temp file: %w", err)
-		}
-		tmpFilePath = tmpFile.Name()
-		log.Printf("Created temporary file at system temp location: %s", tmpFilePath)
-		
-		// Write the HTML content to the temp file
-		log.Printf("Writing HTML content to file (%d bytes)", len(html))
-		if _, err := tmpFile.Write([]byte(html)); err != nil {
-			log.Printf("ERROR: Failed to write to temp file: %v", err)
-			tmpFile.Close()
-			os.Remove(tmpFilePath)
-			return fmt.Errorf("error writing to temp file: %w", err)
-		}
-		
-		if err := tmpFile.Close(); err != nil {
-			log.Printf("ERROR: Failed to close temp file: %v", err)
-			os.Remove(tmpFilePath)
-			return fmt.Errorf("error closing temp file: %w", err)
-		}
-		
-		// Get absolute path for the file
-		absolutePath, err := filepath.Abs(tmpFilePath)
-		if err != nil {
-			log.Printf("ERROR: Failed to get absolute path: %v", err)
-			os.Remove(tmpFilePath)
-			return fmt.Errorf("error getting absolute path: %w", err)
-		}
-		log.Printf("Absolute path: %s", absolutePath)
-		
-		
-			
-			// Try Method 2 if Method 1 fails
-			log.Printf("Trying Method 2: PrintUI.dll approach...")
-			
-			// Get default printer name
-			printerCmd := exec.Command("powershell", "-Command", "Get-WmiObject -Query \"SELECT * FROM Win32_Printer WHERE Default=$true\" | Select-Object -ExpandProperty Name")
-			var printerBuf bytes.Buffer
-			printerCmd.Stdout = &printerBuf
-			
-			if err := printerCmd.Run(); err != nil {
-				log.Printf("WARNING: Could not get default printer name: %v", err)
-				// Continue with empty printer name, Windows will use default
-			}
-			
-			printerName := strings.TrimSpace(printerBuf.String())
-			printUICmd := fmt.Sprintf("rundll32 printui.dll,PrintUIEntry /k /n\"%s\" /f\"%s\"", printerName, absolutePath)
-			log.Printf("Executing command: %s", printUICmd)
-			
-			cmdPrintUI := exec.Command("cmd", "/c", printUICmd)
-			if err := cmdPrintUI.Run(); err != nil {
-				log.Printf("Method 2 ERROR: PrintUI approach failed: %v", err)
-				
-				// Fallback to opening in browser as last resort
-				log.Printf("Falling back to browser method...")
-				browserCmd := exec.Command("cmd", "/c", "start", absolutePath)
-				if err := browserCmd.Run(); err != nil {
-					log.Printf("ERROR: All print methods failed. Last error: %v", err)
-					os.Remove(tmpFilePath)
-					return fmt.Errorf("all print methods failed: %w", err)
-				}
-			} else {
-				log.Printf("Method 2: PrintUI command executed successfully")
-			}
-		
-		
-		// Wait for printing to complete before cleaning up
-		log.Printf("Waiting for print job to complete...")
-		time.Sleep(5 * time.Second)
-		
+    if runtime.GOOS == "windows" {
+        // Create temp file in the system temp directory
+        tmpFile, err := ioutil.TempFile(os.TempDir(), "receipt-*.html")
+        if err != nil {
+            log.Printf("ERROR: Failed to create temp file: %v", err)
+            return fmt.Errorf("error creating temp file: %w", err)
+        }
+        tmpFilePath = tmpFile.Name()
+        log.Printf("Created temporary file at system temp location: %s", tmpFilePath)
+        
+        // Write the HTML content to the temp file
+        log.Printf("Writing HTML content to file (%d bytes)", len(html))
+        if _, err := tmpFile.Write([]byte(html)); err != nil {
+            log.Printf("ERROR: Failed to write to temp file: %v", err)
+            tmpFile.Close()
+            os.Remove(tmpFilePath)
+            return fmt.Errorf("error writing to temp file: %w", err)
+        }
+        
+        if err := tmpFile.Close(); err != nil {
+            log.Printf("ERROR: Failed to close temp file: %v", err)
+            os.Remove(tmpFilePath)
+            return fmt.Errorf("error closing temp file: %w", err)
+        }
+        
+        // Get absolute path for the file
+        absolutePath, err := filepath.Abs(tmpFilePath)
+        if err != nil {
+            log.Printf("ERROR: Failed to get absolute path: %v", err)
+            os.Remove(tmpFilePath)
+            return fmt.Errorf("error getting absolute path: %w", err)
+        }
+        log.Printf("Absolute path: %s", absolutePath)
+        
+        // Skip Method 1 and go directly to Method 2
+        log.Printf("Using Method 2: MSEdge with silent printing...")
+        
+        // Use the Edge browser to print in silent mode
+        // This approach is more reliable for HTML content
+        edgeCmd := exec.Command(
+            "msedge",
+            "--disable-gpu",
+            "--disable-extensions",
+            "--disable-software-rasterizer",
+            "--headless",
+            "--print-to-pdf-no-header",
+            "--disable-print-preview",
+            "--kiosk-printing",
+            fmt.Sprintf("file:///%s", absolutePath),
+        )
+        
+        var edgeOutputBuf, edgeErrorBuf bytes.Buffer
+        edgeCmd.Stdout = &edgeOutputBuf
+        edgeCmd.Stderr = &edgeErrorBuf
+        
+        log.Printf("Executing Edge print command")
+        if err := edgeCmd.Run(); err != nil {
+            log.Printf("Edge method ERROR: %v", err)
+            log.Printf("Edge method STDERR: %s", edgeErrorBuf.String())
+            
+            // Fallback to direct printer access via PowerShell
+            log.Printf("Trying Method 3: Direct printer access via PowerShell...")
+            
+            // Get default printer name
+            printerCmd := exec.Command("powershell", "-Command", "Get-WmiObject -Query \"SELECT * FROM Win32_Printer WHERE Default=$true\" | Select-Object -ExpandProperty Name")
+            var printerBuf bytes.Buffer
+            printerCmd.Stdout = &printerBuf
+            
+            if err := printerCmd.Run(); err != nil {
+                log.Printf("WARNING: Could not get default printer name: %v", err)
+                // Continue with empty printer name, Windows will use default
+            }
+            
+            printerName := strings.TrimSpace(printerBuf.String())
+            
+            // Use Print.dll for direct printing - no reliance on content display
+            printDllCmd := fmt.Sprintf(`$printerName = "%s"; $filePath = "%s"; Add-Type -Assembly "System.Drawing"; Add-Type -Assembly "System.Windows.Forms"; $printDoc = New-Object System.Drawing.Printing.PrintDocument; $printDoc.PrinterSettings.PrinterName = $printerName; $printDoc.PrintPage += { param($sender, $args) $webBrowser = New-Object System.Windows.Forms.WebBrowser; $webBrowser.DocumentText = Get-Content $filePath -Raw; $webBrowser.DrawToBitmap($args.Graphics, "0,0,$($webBrowser.Width),$($webBrowser.Height)") }; $printDoc.Print()`, printerName, absolutePath)
+            
+            log.Printf("Executing PowerShell direct print command")
+            psDllCmd := exec.Command("powershell", "-Command", printDllCmd)
+            
+            var psDllOutput, psDllError bytes.Buffer
+            psDllCmd.Stdout = &psDllOutput
+            psDllCmd.Stderr = &psDllError
+            
+            if err := psDllCmd.Run(); err != nil {
+                log.Printf("Method 3 ERROR: PowerShell direct printing failed: %v", err)
+                log.Printf("Method 3 STDERR: %s", psDllError.String())
+                
+                // Last resort - open in browser and let user print
+                log.Printf("Falling back to browser method...")
+                browserCmd := exec.Command("cmd", "/c", "start", absolutePath)
+                if err := browserCmd.Run(); err != nil {
+                    log.Printf("ERROR: All print methods failed. Last error: %v", err)
+                    // Don't remove the file so the user can access it
+                    return fmt.Errorf("all print methods failed: %w", err)
+                }
+                
+                // Wait a bit longer for the browser to open
+                log.Printf("Opened receipt in browser. Waiting for user to print...")
+                time.Sleep(20 * time.Second)
+            } else {
+                log.Printf("Method 3: PowerShell direct printing succeeded")
+                // Wait for printing to complete
+                time.Sleep(8 * time.Second)
+            }
+        } else {
+            log.Printf("Edge printing succeeded")
+            // Wait for printing to complete
+            time.Sleep(5 * time.Second)
+        }
+        
 	} else {
 		// For non-Windows systems, use the default temp file approach
 		tmpFile, err := ioutil.TempFile("", "receipt-*.html")
