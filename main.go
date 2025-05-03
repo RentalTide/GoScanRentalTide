@@ -528,19 +528,32 @@ func generateReceiptHTML(receipt ReceiptData) string {
 	return html
 }
 
-// Updated printReceipt function with simpler Windows approach
+// Simplified printReceipt function that uses the browser method
 func printReceipt(html string) error {
     log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
     
-    // Create temp file in current working directory instead of system temp
-    tmpFilePath := fmt.Sprintf("receipt-%d.html", time.Now().UnixNano())
-    log.Printf("Creating temporary file: %s", tmpFilePath)
+    // Path for the temporary file
+    tmpFile, err := ioutil.TempFile(os.TempDir(), "receipt-*.html")
+    if err != nil {
+        log.Printf("ERROR: Failed to create temp file: %v", err)
+        return fmt.Errorf("error creating temp file: %w", err)
+    }
+    tmpFilePath := tmpFile.Name()
+    log.Printf("Created temporary file at: %s", tmpFilePath)
     
     // Write the HTML content to the file
-    err := ioutil.WriteFile(tmpFilePath, []byte(html), 0644)
-    if err != nil {
-        log.Printf("ERROR: Failed to write to file: %v", err)
-        return fmt.Errorf("error writing to file: %w", err)
+    log.Printf("Writing HTML content to file (%d bytes)", len(html))
+    if _, err := tmpFile.Write([]byte(html)); err != nil {
+        log.Printf("ERROR: Failed to write to temp file: %v", err)
+        tmpFile.Close()
+        os.Remove(tmpFilePath)
+        return fmt.Errorf("error writing to temp file: %w", err)
+    }
+    
+    if err := tmpFile.Close(); err != nil {
+        log.Printf("ERROR: Failed to close temp file: %v", err)
+        os.Remove(tmpFilePath)
+        return fmt.Errorf("error closing temp file: %w", err)
     }
     
     // Get absolute path
@@ -552,23 +565,25 @@ func printReceipt(html string) error {
     }
     log.Printf("Absolute path: %s", absolutePath)
     
-    // Use the simplest possible approach - open file in default browser
-    // This will typically trigger the print dialog in most browsers
+    // Open in browser (simplest approach)
     log.Printf("Opening file in default browser...")
     cmd := exec.Command("cmd", "/c", "start", absolutePath)
     if err := cmd.Run(); err != nil {
-        log.Printf("ERROR: Failed to open file: %v", err)
+        log.Printf("ERROR: Failed to open file in browser: %v", err)
         os.Remove(tmpFilePath)
-        return fmt.Errorf("error opening file: %w", err)
+        return fmt.Errorf("error opening file in browser: %w", err)
     }
     
     log.Printf("File opened in browser successfully")
     
-    // Return success immediately - file cleanup will happen in background
+    // Return success immediately, but start cleanup in background
     go func() {
-        // Wait longer before cleanup
+        // Wait for printing to complete before cleaning up
+        // Increased wait time to ensure printing completes
+        log.Printf("Waiting for print job to complete...")
         time.Sleep(30 * time.Second)
         
+        // Clean up temporary file
         log.Printf("Cleaning up temporary file: %s", tmpFilePath)
         if err := os.Remove(tmpFilePath); err != nil {
             log.Printf("WARNING: Failed to remove temporary file: %v", err)
