@@ -324,36 +324,35 @@ func scannerHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// generateReceiptHTML creates HTML content for the receipt
+func generateReceiptHTML(receipt ReceiptData) string {
+	locationName := ""
+	switch loc := receipt.Location.(type) {
+	case string:
+		locationName = loc
+	case map[string]interface{}:
+		if name, ok := loc["name"].(string); ok {
+			locationName = name
+		}
+	}
 
-func generatePrintableReceiptHTML(receipt ReceiptData) string {
-    // Extract location name
-    locationName := ""
-    switch loc := receipt.Location.(type) {
-    case string:
-        locationName = loc
-    case map[string]interface{}:
-        if name, ok := loc["name"].(string); ok {
-            locationName = name
-        }
-    }
-    
-    // Build a self-printing HTML file
-    html := `<!DOCTYPE html>
+	// Start building the HTML content
+	html := `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <title>Receipt</title>
   <style>
     @page {
-      size: 80mm auto;
-      margin: 0;
+      margin: 0.5cm;
+      size: 80mm auto;  /* Receipt paper size */
     }
     body {
-      font-family: Arial, sans-serif;
-      width: 80mm;
+      font-family: 'Arial', sans-serif;
       margin: 0;
       padding: 10px;
       font-size: 10pt;
+      width: 80mm;  /* Receipt width */
     }
     .header {
       text-align: center;
@@ -364,105 +363,171 @@ func generatePrintableReceiptHTML(receipt ReceiptData) string {
       font-size: 12pt;
     }
     .divider {
-      border-bottom: 1px dashed #000;
+      border-bottom: 1px dashed #ccc;
       margin: 10px 0;
-    }
-    .items-section {
-      margin-bottom: 10px;
     }
     .item {
       margin-bottom: 5px;
     }
-    .totals-section {
-      margin-bottom: 10px;
+    .item-name {
+      font-weight: bold;
+    }
+    .item-details {
+      display: flex;
+      justify-content: space-between;
+      margin-left: 10px;
+    }
+    .total-section {
+      margin-top: 10px;
+      font-weight: bold;
     }
     .footer {
       text-align: center;
-      margin-top: 10px;
+      margin-top: 15px;
       font-size: 9pt;
     }
   </style>
   <script>
-    // Auto-print and close script
+    // Add an auto-print script that executes as soon as the page loads
     window.onload = function() {
-      // Wait a second to ensure the page is fully loaded
-      setTimeout(function() {
-        window.print();
-        // Wait a bit to allow print dialog to appear and be processed
-        setTimeout(function() {
-          window.close();
-        }, 2000);
-      }, 500);
-    };
+      window.print();
+    }
   </script>
 </head>
 <body>
   <div class="header">
     <div class="business-name">` + locationName + `</div>
-    <div>` + receipt.Date + `</div>`
+    <div class="date">` + receipt.Date + `</div>`
 
-    if receipt.CustomerName != nil {
-        html += `    <div>Customer: ` + *receipt.CustomerName + `</div>`
-    }
+	if receipt.CustomerName != nil {
+		html += `    <div class="customer">Customer: ` + *receipt.CustomerName + `</div>`
+	}
 
-    html += `  </div>
-  
+	html += `  </div>
+
   <div class="divider"></div>
   
-  <div>Transaction ID: ` + receipt.TransactionID + `</div>
-  <div>Payment: ` + strings.Title(receipt.PaymentType) + `</div>
+  <div class="transaction-info">
+    <div>Transaction ID: ` + receipt.TransactionID + `</div>
+    <div>Payment: ` + strings.Title(receipt.PaymentType) + `</div>
+  </div>
   
   <div class="divider"></div>
   
   <div class="items-section">
-    <div style="font-weight: bold;">ITEMS</div>`
+    <div style="font-weight: bold; margin-bottom: 5px;">ITEMS</div>`
 
-    // Add items
-    for _, item := range receipt.Items {
-        name, _ := item["name"].(string)
-        quantity, _ := item["quantity"].(float64)
-        price, _ := item["price"].(float64)
-        
-        html += fmt.Sprintf(`
+	// Add items
+	for _, item := range receipt.Items {
+		name, _ := item["name"].(string)
+		quantity, _ := item["quantity"].(float64)
+		price, _ := item["price"].(float64)
+		sku, _ := item["sku"].(string)
+
+		html += fmt.Sprintf(`
     <div class="item">
-      <div>%s</div>
-      <div style="display: flex; justify-content: space-between;">
-        <span>%.0f x $%.2f</span>
-        <span>$%.2f</span>
-      </div>
-    </div>`, name, quantity, price, quantity*price)
-    }
+      <div class="item-name">%s</div>
+      <div class="item-details">
+        <div>%.0f x $%.2f</div>
+        <div>$%.2f</div>
+      </div>`, name, quantity, price, quantity*price)
 
-    html += `
+		if sku != "" {
+			html += fmt.Sprintf(`
+      <div style="margin-left: 10px; font-size: 8pt;">SKU: %s</div>`, sku)
+		}
+
+		html += `
+    </div>`
+	}
+
+	html += `
   </div>
   
   <div class="divider"></div>
   
   <div class="totals-section">
     <div style="display: flex; justify-content: space-between;">
-      <span>Subtotal:</span>
-      <span>$` + fmt.Sprintf("%.2f", receipt.Subtotal) + `</span>
-    </div>
+      <div>Subtotal:</div>
+      <div>$` + fmt.Sprintf("%.2f", receipt.Subtotal) + `</div>
+    </div>`
+
+	// Add discount if applicable
+	if receipt.DiscountAmount != nil && receipt.DiscountPercentage != nil {
+		html += fmt.Sprintf(`
     <div style="display: flex; justify-content: space-between;">
-      <span>Tax:</span>
-      <span>$` + fmt.Sprintf("%.2f", receipt.Tax) + `</span>
+      <div>Discount (%.0f%%):</div>
+      <div>-$%.2f</div>
+    </div>`, *receipt.DiscountPercentage, *receipt.DiscountAmount)
+	}
+
+	// Add tax
+	html += `
+    <div style="display: flex; justify-content: space-between;">
+      <div>Tax:</div>
+      <div>$` + fmt.Sprintf("%.2f", receipt.Tax) + `</div>
     </div>
-    <div style="font-weight: bold; display: flex; justify-content: space-between; margin-top: 5px;">
-      <span>TOTAL:</span>
-      <span>$` + fmt.Sprintf("%.2f", receipt.Total) + `</span>
-    </div>
+    <div style="margin-left: 10px; font-size: 8pt;">
+      <div>GST (5%): $` + fmt.Sprintf("%.2f", receipt.Subtotal*0.05) + `</div>
+      <div>PST (7%): $` + fmt.Sprintf("%.2f", receipt.Subtotal*0.07) + `</div>
+    </div>`
+
+	// Add refund if applicable
+	if receipt.RefundAmount != nil && *receipt.RefundAmount > 0 {
+		html += fmt.Sprintf(`
+    <div style="display: flex; justify-content: space-between;">
+      <div>Refund:</div>
+      <div>-$%.2f</div>
+    </div>`, *receipt.RefundAmount)
+	}
+
+	// Add tip if applicable
+	if receipt.Tip != nil && *receipt.Tip > 0 {
+		html += fmt.Sprintf(`
+    <div style="display: flex; justify-content: space-between;">
+      <div>Tip:</div>
+      <div>$%.2f</div>
+    </div>`, *receipt.Tip)
+	}
+
+	// Total
+	html += `
+    <div style="display: flex; justify-content: space-between; margin-top: 10px; padding: 5px; background-color: #f5f5f5; font-weight: bold;">
+      <div>TOTAL:</div>
+      <div>$` + fmt.Sprintf("%.2f", receipt.Total) + `</div>
+    </div>`
+
+	// Cash payment details if applicable
+	if receipt.PaymentType == "cash" && receipt.CashGiven != nil && receipt.ChangeDue != nil {
+		html += fmt.Sprintf(`
+    <div style="margin-top: 10px; padding: 5px; background-color: #f8f8f8;">
+      <div style="display: flex; justify-content: space-between;">
+        <div>Cash:</div>
+        <div>$%.2f</div>
+      </div>
+      <div style="display: flex; justify-content: space-between;">
+        <div>Change:</div>
+        <div>$%.2f</div>
+      </div>
+    </div>`, *receipt.CashGiven, *receipt.ChangeDue)
+	}
+
+	// Footer
+	html += `
   </div>
   
   <div class="divider"></div>
   
   <div class="footer">
-    <div>Thank you for your purchase!</div>
+    <div style="font-weight: bold;">Thank you for your purchase!</div>
+    <div style="margin-top: 5px;">Visit us again at ` + locationName + `</div>
   </div>
 </body>
 </html>`
 
-    return html
+	return html
 }
+
 
 func printReceipt(html string) error {
     log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
@@ -474,7 +539,7 @@ func printReceipt(html string) error {
         return fmt.Errorf("error getting current directory: %w", err)
     }
     
-    // Create a file in the current directory
+    // Create receipt file in current directory
     receiptFileName := fmt.Sprintf("receipt-%d.html", time.Now().UnixNano())
     receiptFilePath := filepath.Join(currentDir, receiptFileName)
     
@@ -487,26 +552,47 @@ func printReceipt(html string) error {
         return fmt.Errorf("error writing receipt file: %w", err)
     }
     
-    // Open the HTML file in the default browser
-    log.Printf("Opening receipt file in browser")
-    cmd := exec.Command("cmd", "/c", "start", receiptFilePath)
-    err = cmd.Run()
-    if err != nil {
-        log.Printf("ERROR: Failed to open receipt in browser: %v", err)
-        return fmt.Errorf("error opening receipt in browser: %w", err)
+    // Get the path to the PowerShell script (assuming it's in the same directory)
+    psScriptPath := filepath.Join(currentDir, "DirectPrint.ps1")
+    
+    // Check if the script exists
+    if _, err := os.Stat(psScriptPath); os.IsNotExist(err) {
+        log.Printf("ERROR: PowerShell script not found at %s", psScriptPath)
+        return fmt.Errorf("PowerShell script not found: %w", err)
     }
     
-    log.Printf("Receipt opened in browser successfully")
+    // Run the PowerShell script with the receipt file path
+    log.Printf("Running PowerShell script to print receipt")
+    cmd := exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-File", psScriptPath, receiptFilePath)
     
-    // Return success immediately, start cleanup in background
+    var stdoutBuf, stderrBuf bytes.Buffer
+    cmd.Stdout = &stdoutBuf
+    cmd.Stderr = &stderrBuf
+    
+    // Return success immediately
     go func() {
-        // Wait much longer before cleanup to ensure printing completes
-        log.Printf("Waiting for print job to complete...")
-        time.Sleep(60 * time.Second)
+        err := cmd.Run()
+        stdout := stdoutBuf.String()
+        stderr := stderrBuf.String()
+        
+        // Log the output for debugging
+        log.Printf("PowerShell Output: %s", stdout)
+        if stderr != "" {
+            log.Printf("PowerShell Error: %s", stderr)
+        }
+        
+        if err != nil {
+            log.Printf("ERROR: PowerShell execution failed: %v", err)
+        } else {
+            log.Printf("PowerShell script executed successfully")
+        }
+        
+        // Wait some time before cleaning up
+        time.Sleep(30 * time.Second)
         
         // Clean up the receipt file
         log.Printf("Cleaning up receipt file: %s", receiptFilePath)
-        err := os.Remove(receiptFilePath)
+        err = os.Remove(receiptFilePath)
         if err != nil {
             log.Printf("WARNING: Failed to remove receipt file: %v", err)
         } else {
@@ -518,7 +604,6 @@ func printReceipt(html string) error {
     
     return nil
 }
-
 func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
     log.Printf("Received print receipt request from %s", r.RemoteAddr)
     
@@ -537,26 +622,24 @@ func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
         return
     }
     
-    log.Printf("Processing receipt - Transaction ID: %s, Items: %d", 
-        receipt.TransactionID, len(receipt.Items))
-
     // Generate HTML for the receipt
-    html := generatePrintableReceiptHTML(receipt)
+    html := generateReceiptHTML(receipt)
     
-    // Return success response immediately
-    log.Printf("Returning success response to client")
-    w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(map[string]interface{}{
-        "status":  "success",
-        "message": "Receipt print job submitted successfully",
-    })
-    
-    // Start printing process after returning response
+    // Start printing in a separate goroutine
     go func() {
         if err := printReceipt(html); err != nil {
             log.Printf("ERROR: Failed to print receipt: %v", err)
         }
     }()
+    
+    // Return success response immediately
+    log.Printf("Returning success response to client")
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK)
+    json.NewEncoder(w).Encode(map[string]interface{}{
+        "status":  "success",
+        "message": "Receipt print job submitted successfully",
+    })
 }
 
 func main() {
