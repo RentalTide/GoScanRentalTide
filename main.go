@@ -477,158 +477,168 @@ func generateReceiptHTML(receipt ReceiptData) string {
 	return base64.StdEncoding.EncodeToString(buf.Bytes())
 }
 
-// Note: You'll need to update the printReceipt function to handle PDF data
-
 // printReceipt uses system commands to send HTML content to the default printer
-func printReceipt(html string) error {
+func printReceipt(pdfBase64 string) error {
 	// Set up logging for the function
 	log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
+	
+	// Decode the Base64 PDF content
+	pdfData, err := base64.StdEncoding.DecodeString(pdfBase64)
+	if err != nil {
+		log.Printf("ERROR: Failed to decode base64 PDF content: %v", err)
+		return fmt.Errorf("error decoding PDF content: %w", err)
+	}
+	log.Printf("Successfully decoded PDF data (%d bytes)", len(pdfData))
 	
 	// Path for the temporary file
 	var tmpFilePath string
 
-	if runtime.GOOS == "windows" {
-		// Create temp file in the system temp directory which should be writable
-		tmpFile, err := ioutil.TempFile(os.TempDir(), "receipt-*.html")
-		if err != nil {
-			log.Printf("ERROR: Failed to create temp file: %v", err)
-			return fmt.Errorf("error creating temp file: %w", err)
-		}
-		tmpFilePath = tmpFile.Name()
-		log.Printf("Created temporary file at system temp location: %s", tmpFilePath)
-		
-		// Write the HTML content to the temp file
-		log.Printf("Writing HTML content to file (%d bytes)", len(html))
-		if _, err := tmpFile.Write([]byte(html)); err != nil {
-			log.Printf("ERROR: Failed to write to temp file: %v", err)
-			tmpFile.Close()
-			os.Remove(tmpFilePath)
-			return fmt.Errorf("error writing to temp file: %w", err)
-		}
-		
-		if err := tmpFile.Close(); err != nil {
-			log.Printf("ERROR: Failed to close temp file: %v", err)
-			os.Remove(tmpFilePath)
-			return fmt.Errorf("error closing temp file: %w", err)
-		}
-		
-		// Get absolute path for the file
-		absolutePath, err := filepath.Abs(tmpFilePath)
-		if err != nil {
-			log.Printf("ERROR: Failed to get absolute path: %v", err)
-			os.Remove(tmpFilePath)
-			return fmt.Errorf("error getting absolute path: %w", err)
-		}
-		log.Printf("Absolute path: %s", absolutePath)
-		
-		// Method 1: Use PowerShell to print with .NET
-		log.Printf("Trying Method 1: .NET Printing via PowerShell...")
-		psCommand := fmt.Sprintf(`Add-Type -AssemblyName PresentationCore; Add-Type -AssemblyName PresentationFramework; Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $printDoc = New-Object System.Drawing.Printing.PrintDocument; $printDoc.DocumentName = '%s'; $printDoc.Print()`, filepath.Base(tmpFilePath))
-		cmd := exec.Command("powershell", "-Command", psCommand)
-		
-		var outputBuf, errorBuf bytes.Buffer
-		cmd.Stdout = &outputBuf
-		cmd.Stderr = &errorBuf
-		
-		if err := cmd.Run(); err != nil {
-			log.Printf("Method 1 ERROR: Failed to print with .NET: %v", err)
-			log.Printf("Method 1 STDERR: %s", errorBuf.String())
-			log.Printf("Method 1 STDOUT: %s", outputBuf.String())
-			
-			// Try Method 2 if Method 1 fails
-			log.Printf("Trying Method 2: PrintUI.dll approach...")
-			
-			// Get default printer name
-			printerCmd := exec.Command("powershell", "-Command", "Get-WmiObject -Query \"SELECT * FROM Win32_Printer WHERE Default=$true\" | Select-Object -ExpandProperty Name")
-			var printerBuf bytes.Buffer
-			printerCmd.Stdout = &printerBuf
-			
-			if err := printerCmd.Run(); err != nil {
-				log.Printf("WARNING: Could not get default printer name: %v", err)
-				// Continue with empty printer name, Windows will use default
-			}
-			
-			printerName := strings.TrimSpace(printerBuf.String())
-			printUICmd := fmt.Sprintf("rundll32 printui.dll,PrintUIEntry /k /n\"%s\" /f\"%s\"", printerName, absolutePath)
-			log.Printf("Executing command: %s", printUICmd)
-			
-			cmdPrintUI := exec.Command("cmd", "/c", printUICmd)
-			if err := cmdPrintUI.Run(); err != nil {
-				log.Printf("Method 2 ERROR: PrintUI approach failed: %v", err)
-				
-				// Fallback to opening in browser as last resort
-				log.Printf("Falling back to browser method...")
-				browserCmd := exec.Command("cmd", "/c", "start", absolutePath)
-				if err := browserCmd.Run(); err != nil {
-					log.Printf("ERROR: All print methods failed. Last error: %v", err)
-					os.Remove(tmpFilePath)
-					return fmt.Errorf("all print methods failed: %w", err)
-				}
-			} else {
-				log.Printf("Method 2: PrintUI command executed successfully")
-			}
-		} else {
-			log.Printf("Method 1: .NET printing succeeded")
-		}
-		
-		// Wait for printing to complete before cleaning up
-		log.Printf("Waiting for print job to complete...")
-		time.Sleep(5 * time.Second)
-		
-	} else {
-		// For non-Windows systems, use the default temp file approach
-		tmpFile, err := ioutil.TempFile("", "receipt-*.html")
-		if err != nil {
-			log.Printf("ERROR: Failed to create temp file: %v", err)
-			return fmt.Errorf("error creating temp file: %w", err)
-		}
-		tmpFilePath = tmpFile.Name()
-		log.Printf("Created temporary file: %s", tmpFilePath)
-		
-		// Write the HTML content to the temp file
-		log.Printf("Writing HTML content to file")
-		if _, err := tmpFile.Write([]byte(html)); err != nil {
-			log.Printf("ERROR: Failed to write to temp file: %v", err)
-			tmpFile.Close()
-			os.Remove(tmpFilePath)
-			return fmt.Errorf("error writing to temp file: %w", err)
-		}
-		if err := tmpFile.Close(); err != nil {
-			log.Printf("ERROR: Failed to close temp file: %v", err)
-			os.Remove(tmpFilePath)
-			return fmt.Errorf("error closing temp file: %w", err)
-		}
-		
-		// Print the file using the operating system's default printer
-		var cmd *exec.Cmd
-		if runtime.GOOS == "darwin" {
-			// On macOS, use lp command
-			log.Printf("Using lp command to print on macOS")
-			cmd = exec.Command("lp", tmpFilePath)
-		} else {
-			// On Linux, use lp command
-			log.Printf("Using lp command to print on Linux")
-			cmd = exec.Command("lp", tmpFilePath)
-		}
-		
-		// Execute the print command
-		var outputBuf, errorBuf bytes.Buffer
-		cmd.Stdout = &outputBuf
-		cmd.Stderr = &errorBuf
-		
-		log.Printf("Executing print command")
-		if err := cmd.Run(); err != nil {
-			log.Printf("ERROR: Print command failed: %v", err)
-			log.Printf("STDERR: %s", errorBuf.String())
-			return fmt.Errorf("error printing receipt: %w, stderr: %s", err, errorBuf.String())
-		}
-		
-		log.Printf("Print command executed successfully")
-		
-		// Add a small delay to ensure the print job is sent before we delete the file
-		log.Printf("Waiting for print job to complete")
-		time.Sleep(2 * time.Second)
+	// Create temp PDF file
+	tmpFile, err := ioutil.TempFile("", "receipt-*.pdf")
+	if err != nil {
+		log.Printf("ERROR: Failed to create temp file: %v", err)
+		return fmt.Errorf("error creating temp file: %w", err)
 	}
+	tmpFilePath = tmpFile.Name()
+	log.Printf("Created temporary PDF file: %s", tmpFilePath)
+	
+	// Write the PDF content to the temp file
+	log.Printf("Writing PDF content to file (%d bytes)", len(pdfData))
+	if _, err := tmpFile.Write(pdfData); err != nil {
+		log.Printf("ERROR: Failed to write to temp file: %v", err)
+		tmpFile.Close()
+		os.Remove(tmpFilePath)
+		return fmt.Errorf("error writing to temp file: %w", err)
+	}
+	
+	if err := tmpFile.Close(); err != nil {
+		log.Printf("ERROR: Failed to close temp file: %v", err)
+		os.Remove(tmpFilePath)
+		return fmt.Errorf("error closing temp file: %w", err)
+	}
+
+	// Get absolute path for the file
+	absolutePath, err := filepath.Abs(tmpFilePath)
+	if err != nil {
+		log.Printf("ERROR: Failed to get absolute path: %v", err)
+		os.Remove(tmpFilePath)
+		return fmt.Errorf("error getting absolute path: %w", err)
+	}
+	log.Printf("Absolute path: %s", absolutePath)
+	
+	if runtime.GOOS == "windows" {
+		// Windows printing approach
+		log.Printf("Printing PDF on Windows...")
+		
+		// Method 1: Use SumatraPDF if available (silent printing)
+		sumatraPaths := []string{
+			"C:\\Program Files\\SumatraPDF\\SumatraPDF.exe",
+			"C:\\Program Files (x86)\\SumatraPDF\\SumatraPDF.exe",
+		}
+		
+		for _, path := range sumatraPaths {
+			if _, err := os.Stat(path); err == nil {
+				log.Printf("Found SumatraPDF at: %s", path)
+				cmd := exec.Command(path, "-print-to-default", "-silent", absolutePath)
+				if err := cmd.Run(); err == nil {
+					log.Printf("Successfully printed PDF using SumatraPDF")
+					time.Sleep(2 * time.Second)
+					goto cleanup // Skip to cleanup if successful
+				} else {
+					log.Printf("SumatraPDF printing failed: %v", err)
+				}
+			}
+		}
+		
+		// Method 2: Try using the default Windows print command
+		log.Printf("Trying default Windows print command...")
+		cmd := exec.Command("rundll32", "mshtml.dll,PrintHTML", absolutePath)
+		if err := cmd.Run(); err != nil {
+			log.Printf("Default Windows print command failed: %v", err)
+			
+			// Method 3: Try using AcroRd32.exe if available
+			acroPaths := []string{
+				"C:\\Program Files (x86)\\Adobe\\Acrobat Reader DC\\Reader\\AcroRd32.exe",
+				"C:\\Program Files\\Adobe\\Acrobat Reader DC\\Reader\\AcroRd32.exe",
+			}
+			
+			for _, path := range acroPaths {
+				if _, err := os.Stat(path); err == nil {
+					log.Printf("Found Acrobat Reader at: %s", path)
+					cmd := exec.Command(path, "/p", "/h", absolutePath)
+					if err := cmd.Run(); err == nil {
+						log.Printf("Successfully printed PDF using Acrobat Reader")
+						time.Sleep(2 * time.Second)
+						goto cleanup // Skip to cleanup if successful
+					} else {
+						log.Printf("Acrobat Reader printing failed: %v", err)
+					}
+				}
+			}
+			
+			// Fallback: open the PDF file for the user to print manually
+			log.Printf("Falling back to opening PDF file...")
+			cmd := exec.Command("cmd", "/c", "start", absolutePath)
+			if err := cmd.Run(); err != nil {
+				log.Printf("ERROR: All print methods failed. Last error: %v", err)
+				return fmt.Errorf("all print methods failed: %w", err)
+			} else {
+				log.Printf("Opened PDF file for manual printing")
+			}
+		} else {
+			log.Printf("Successfully printed PDF using default Windows print command")
+		}
+	} else if runtime.GOOS == "darwin" {
+		// macOS printing approach
+		log.Printf("Printing PDF on macOS...")
+		cmd := exec.Command("lp", absolutePath)
+		var outputBuf, errorBuf bytes.Buffer
+		cmd.Stdout = &outputBuf
+		cmd.Stderr = &errorBuf
+		
+		if err := cmd.Run(); err != nil {
+			log.Printf("ERROR: lp command failed: %v", err)
+			log.Printf("STDERR: %s", errorBuf.String())
+			
+			// Try using open command with -a Preview
+			log.Printf("Trying to open with Preview app...")
+			openCmd := exec.Command("open", "-a", "Preview", absolutePath)
+			if err := openCmd.Run(); err != nil {
+				log.Printf("ERROR: Failed to open with Preview: %v", err)
+				return fmt.Errorf("error printing receipt: %w", err)
+			}
+		} else {
+			log.Printf("Successfully printed PDF using lp command")
+			log.Printf("STDOUT: %s", outputBuf.String())
+		}
+	} else {
+		// Linux printing approach
+		log.Printf("Printing PDF on Linux...")
+		cmd := exec.Command("lp", absolutePath)
+		var outputBuf, errorBuf bytes.Buffer
+		cmd.Stdout = &outputBuf
+		cmd.Stderr = &errorBuf
+		
+		if err := cmd.Run(); err != nil {
+			log.Printf("ERROR: lp command failed: %v", err)
+			log.Printf("STDERR: %s", errorBuf.String())
+			
+			// Try using xdg-open as fallback
+			log.Printf("Trying to open with default PDF viewer...")
+			openCmd := exec.Command("xdg-open", absolutePath)
+			if err := openCmd.Run(); err != nil {
+				log.Printf("ERROR: Failed to open with default viewer: %v", err)
+				return fmt.Errorf("error printing receipt: %w", err)
+			}
+		} else {
+			log.Printf("Successfully printed PDF using lp command")
+			log.Printf("STDOUT: %s", outputBuf.String())
+		}
+	}
+
+cleanup:
+	// Wait a bit to ensure the file is not in use before deleting
+	time.Sleep(3 * time.Second)
 	
 	// Clean up temporary file
 	log.Printf("Cleaning up temporary file: %s", tmpFilePath)
