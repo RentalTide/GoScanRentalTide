@@ -528,7 +528,7 @@ func generateReceiptHTML(receipt ReceiptData) string {
 	return html
 }
 
-// Simplified printReceipt function that uses the browser method
+// Modified printReceipt function that only uses the browser method
 func printReceipt(html string) error {
     log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
     
@@ -565,11 +565,11 @@ func printReceipt(html string) error {
     }
     log.Printf("Absolute path: %s", absolutePath)
     
-    // Open in browser (simplest approach)
+    // ONLY use browser method - skip PowerShell completely
     log.Printf("Opening file in default browser...")
-    cmd := exec.Command("cmd", "/c", "start", absolutePath)
-    if err := cmd.Run(); err != nil {
-        log.Printf("ERROR: Failed to open file in browser: %v", err)
+    browserCmd := exec.Command("cmd", "/c", "start", absolutePath)
+    if err := browserCmd.Run(); err != nil {
+        log.Printf("ERROR: Failed to open in browser: %v", err)
         os.Remove(tmpFilePath)
         return fmt.Errorf("error opening file in browser: %w", err)
     }
@@ -578,8 +578,7 @@ func printReceipt(html string) error {
     
     // Return success immediately, but start cleanup in background
     go func() {
-        // Wait for printing to complete before cleaning up
-        // Increased wait time to ensure printing completes
+        // Wait longer before cleanup
         log.Printf("Waiting for print job to complete...")
         time.Sleep(30 * time.Second)
         
