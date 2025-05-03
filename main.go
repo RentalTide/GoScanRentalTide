@@ -741,6 +741,7 @@ func main() {
 	
 	mux := http.NewServeMux()
 	mux.HandleFunc("/scanner/scan", scannerHandler)
+	//mux.HandleFunc("/print/receipt", handlePrintReceipt)
 
 	handler := corsMiddleware(mux)
 	port := 3500 // change port will break front end so don't
