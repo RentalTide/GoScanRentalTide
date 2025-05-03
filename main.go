@@ -324,8 +324,7 @@ func scannerHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// Updated generateReceiptHTML with better print styling
-// Updated generateReceiptHTML with improved print trigger
+// Updated generateReceiptHTML with Edge-focused print trigger
 func generateReceiptHTML(receipt ReceiptData) string {
     locationName := ""
     switch loc := receipt.Location.(type) {
@@ -337,20 +336,13 @@ func generateReceiptHTML(receipt ReceiptData) string {
         }
     }
 
-    // Start building the HTML content with guaranteed print trigger
+    // Build HTML with width optimized for thermal receipt printers
     html := `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <title>Receipt</title>
   <style>
-    /* Reset and base styles */
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-    
     /* Print-specific styles */
     @page {
       size: 80mm auto;  /* Width of thermal receipt paper */
@@ -359,90 +351,86 @@ func generateReceiptHTML(receipt ReceiptData) string {
     
     @media print {
       body {
-        width: 70mm !important;  /* Slightly less than page width to account for margins */
+        width: 70mm !important;
         margin: 0 auto !important;
-        padding: 0 !important;
+        padding: 5mm !important;
         background-color: white !important;
         color: black !important;
       }
     }
     
-    /* General styles */
+    /* Base styles */
     body {
-      font-family: Arial, sans-serif;
-      font-size: 12pt;
+      font-family: 'Arial', sans-serif;
+      font-size: 10pt;
       width: 70mm;
       margin: 0 auto;
       padding: 5mm;
-      background-color: white;
-      color: black;
     }
     
     .header {
       text-align: center;
-      margin-bottom: 8mm;
+      margin-bottom: 5mm;
     }
     
     .business-name {
       font-weight: bold;
-      font-size: 14pt;
-      margin-bottom: 2mm;
+      font-size: 12pt;
     }
     
     .divider {
       border-bottom: 1px dashed #000;
-      margin: 4mm 0;
-      width: 100%;
+      margin: 3mm 0;
     }
     
-    /* More styles as needed */
+    .total {
+      font-weight: bold;
+      margin-top: 2mm;
+    }
+    
+    .footer {
+      text-align: center;
+      margin-top: 5mm;
+    }
   </style>
 </head>
 <body>
   <div class="header">
     <div class="business-name">` + locationName + `</div>
-    <div class="date">` + receipt.Date + `</div>`
+    <div>` + receipt.Date + `</div>`
 
     if receipt.CustomerName != nil {
-        html += `    <div class="customer">Customer: ` + *receipt.CustomerName + `</div>`
+        html += `    <div>Customer: ` + *receipt.CustomerName + `</div>`
     }
 
     html += `  </div>
 
   <div class="divider"></div>
   
-  <div class="transaction-info">
+  <div>
     <div>Transaction ID: ` + receipt.TransactionID + `</div>
     <div>Payment: ` + strings.Title(receipt.PaymentType) + `</div>
   </div>
   
   <div class="divider"></div>
   
-  <div class="items-section">
-    <div style="font-weight: bold; margin-bottom: 2mm;">ITEMS</div>`
+  <div>
+    <div style="font-weight: bold;">ITEMS</div>`
 
-    // Add items
+    // Add items in a simpler format
     for _, item := range receipt.Items {
         name, _ := item["name"].(string)
         quantity, _ := item["quantity"].(float64)
         price, _ := item["price"].(float64)
-        sku, _ := item["sku"].(string)
 
         html += fmt.Sprintf(`
-    <div style="margin-bottom: 3mm;">
+    <div style="margin: 2mm 0;">
       <div style="font-weight: bold;">%s</div>
-      <div style="display: flex; justify-content: space-between; margin-left: 3mm;">
-        <div>%.0f x $%.2f</div>
-        <div>$%.2f</div>
-      </div>`, name, quantity, price, quantity*price)
-
-        if sku != "" {
-            html += fmt.Sprintf(`
-      <div style="margin-left: 3mm; font-size: 9pt;">SKU: %s</div>`, sku)
-        }
-
-        html += `
-    </div>`
+      <div style="display: flex; justify-content: space-between;">
+        <span>%.0f x $%.2f</span>
+        <span>$%.2f</span>
+      </div>
+    </div>`, name, quantity, price, quantity*price)
     }
 
     html += `
@@ -450,56 +438,42 @@ func generateReceiptHTML(receipt ReceiptData) string {
   
   <div class="divider"></div>
   
-  <div style="margin-bottom: 4mm;">`
-
-    // Subtotal
-    html += `
-    <div style="display: flex; justify-content: space-between; margin-bottom: 1mm;">
-      <div>Subtotal:</div>
-      <div>$` + fmt.Sprintf("%.2f", receipt.Subtotal) + `</div>
-    </div>`
-
-    // Add tax
-    html += `
-    <div style="display: flex; justify-content: space-between; margin-bottom: 1mm;">
-      <div>Tax:</div>
-      <div>$` + fmt.Sprintf("%.2f", receipt.Tax) + `</div>
+  <div>
+    <div style="display: flex; justify-content: space-between;">
+      <span>Subtotal:</span>
+      <span>$` + fmt.Sprintf("%.2f", receipt.Subtotal) + `</span>
     </div>
-    <div style="margin-left: 3mm; font-size: 9pt;">
-      <div>GST (5%): $` + fmt.Sprintf("%.2f", receipt.Subtotal*0.05) + `</div>
-      <div>PST (7%): $` + fmt.Sprintf("%.2f", receipt.Subtotal*0.07) + `</div>
-    </div>`
-
-    // Total
-    html += `
-    <div style="display: flex; justify-content: space-between; margin-top: 2mm; border-top: 1px solid #000; padding-top: 2mm; font-weight: bold;">
-      <div>TOTAL:</div>
-      <div>$` + fmt.Sprintf("%.2f", receipt.Total) + `</div>
-    </div>`
-
-    html += `
+    
+    <div style="display: flex; justify-content: space-between;">
+      <span>Tax:</span>
+      <span>$` + fmt.Sprintf("%.2f", receipt.Tax) + `</span>
+    </div>
+    
+    <div style="display: flex; justify-content: space-between; margin-top: 2mm; font-weight: bold;">
+      <span>TOTAL:</span>
+      <span>$` + fmt.Sprintf("%.2f", receipt.Total) + `</span>
+    </div>
   </div>
   
   <div class="divider"></div>
   
-  <div style="text-align: center; margin-top: 5mm; font-size: 10pt;">
+  <div class="footer">
     <div style="font-weight: bold;">Thank you for your purchase!</div>
-    <div style="margin-top: 2mm;">Visit us again at ` + locationName + `</div>
+    <div>Visit us again at ` + locationName + `</div>
   </div>
 
-  <!-- This script forces printing immediately -->
+  <!-- Script to print immediately when opened -->
   <script>
-    document.addEventListener('DOMContentLoaded', function() {
-      window.print();
-      // Handle print dialog closed
-      window.addEventListener('afterprint', function() {
-        window.close();
-      });
-      // Fallback in case afterprint doesn't fire
-      setTimeout(function() {
-        window.close();
-      }, 5000);
-    });
+    // Try to print immediately when loaded
+    window.onload = function() {
+      try {
+        setTimeout(function() {
+          window.print();
+        }, 500);
+      } catch(e) {
+        console.error("Print failed:", e);
+      }
+    };
   </script>
 </body>
 </html>`
@@ -548,7 +522,8 @@ func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
     }()
 }
 
-// Create a batch script that forces printing
+
+// Create a batch script that forces printing with Microsoft Edge
 func printReceipt(html string) error {
     log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
     
@@ -575,23 +550,24 @@ func printReceipt(html string) error {
         return fmt.Errorf("error writing HTML file: %w", err)
     }
     
-    // Create batch file content with Chrome in kiosk printing mode
-    // This uses Chrome's --kiosk-printing flag which bypasses the print dialog
+    // Create batch file content specifically for Edge with kiosk printing
     batchContent := fmt.Sprintf(`@echo off
-echo Printing receipt directly...
-:: Try using Chrome with kiosk printing (silent printing)
-start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --kiosk-printing "%s"
-:: If Chrome isn't found, try with Microsoft Edge
-if %%ERRORLEVEL%% NEQ 0 (
-    echo Chrome not found, trying Microsoft Edge...
-    start "" "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --kiosk-printing "%s"
+echo Printing receipt directly with Microsoft Edge...
+:: Try multiple Edge installation paths
+set EDGE_PATH="C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+if not exist %EDGE_PATH% (
+  set EDGE_PATH="C:\Program Files\Microsoft\Edge\Application\msedge.exe"
 )
+
+:: Print with Edge in kiosk printing mode
+%EDGE_PATH% --kiosk-printing "%s"
+
 echo Waiting for print to complete...
 timeout /t 20 >nul
 echo Cleaning up files...
 del "%s"
 del "%s"
-`, htmlFilePath, htmlFilePath, htmlFilePath, batchFilePath)
+`, htmlFilePath, htmlFilePath, batchFilePath)
     
     // Write the batch file
     log.Printf("Creating batch file: %s", batchFilePath)
@@ -617,6 +593,8 @@ del "%s"
     
     return nil
 }
+
+
 func main() {
 	// Set up logging
 	log.SetOutput(os.Stdout)
