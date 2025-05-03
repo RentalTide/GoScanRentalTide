@@ -530,262 +530,279 @@ func generateReceiptHTML(receipt ReceiptData) string {
 
 // printReceipt uses system commands to send HTML content to the default printer
 func printReceipt(html string) error {
-    log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
-    
-    var tmpFilePath string
+	// Set up logging for the function
+	log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
+	
+	// Path for the temporary file
+	var tmpFilePath string
 
-    if runtime.GOOS == "windows" {
-        // Create temp file in the system temp directory
-        tmpFile, err := ioutil.TempFile(os.TempDir(), "receipt-*.html")
-        if err != nil {
-            log.Printf("ERROR: Failed to create temp file: %v", err)
-            return fmt.Errorf("error creating temp file: %w", err)
-        }
-        tmpFilePath = tmpFile.Name()
-        log.Printf("Created temporary file at system temp location: %s", tmpFilePath)
-        
-        // Write the HTML content to the temp file
-        log.Printf("Writing HTML content to file (%d bytes)", len(html))
-        if _, err := tmpFile.Write([]byte(html)); err != nil {
-            log.Printf("ERROR: Failed to write to temp file: %v", err)
-            tmpFile.Close()
-            os.Remove(tmpFilePath)
-            return fmt.Errorf("error writing to temp file: %w", err)
-        }
-        
-        if err := tmpFile.Close(); err != nil {
-            log.Printf("ERROR: Failed to close temp file: %v", err)
-            os.Remove(tmpFilePath)
-            return fmt.Errorf("error closing temp file: %w", err)
-        }
-        
-        // Get absolute path for the file
-        absolutePath, err := filepath.Abs(tmpFilePath)
-        if err != nil {
-            log.Printf("ERROR: Failed to get absolute path: %v", err)
-            os.Remove(tmpFilePath)
-            return fmt.Errorf("error getting absolute path: %w", err)
-        }
-        log.Printf("Absolute path: %s", absolutePath)
-        
-        // Skip Method 1 and go directly to Method 2
-        log.Printf("Using Method 2: MSEdge with silent printing...")
-        
-        // Use the Edge browser to print in silent mode
-        // This approach is more reliable for HTML content
-        edgeCmd := exec.Command(
-            "msedge",
-            "--disable-gpu",
-            "--disable-extensions",
-            "--disable-software-rasterizer",
-            "--headless",
-            "--print-to-pdf-no-header",
-            "--disable-print-preview",
-            "--kiosk-printing",
-            fmt.Sprintf("file:///%s", absolutePath),
-        )
-        
-        var edgeOutputBuf, edgeErrorBuf bytes.Buffer
-        edgeCmd.Stdout = &edgeOutputBuf
-        edgeCmd.Stderr = &edgeErrorBuf
-        
-        log.Printf("Executing Edge print command")
-        if err := edgeCmd.Run(); err != nil {
-            log.Printf("Edge method ERROR: %v", err)
-            log.Printf("Edge method STDERR: %s", edgeErrorBuf.String())
-            
-            // Fallback to direct printer access via PowerShell
-            log.Printf("Trying Method 3: Direct printer access via PowerShell...")
-            
-            // Get default printer name
-            printerCmd := exec.Command("powershell", "-Command", "Get-WmiObject -Query \"SELECT * FROM Win32_Printer WHERE Default=$true\" | Select-Object -ExpandProperty Name")
-            var printerBuf bytes.Buffer
-            printerCmd.Stdout = &printerBuf
-            
-            if err := printerCmd.Run(); err != nil {
-                log.Printf("WARNING: Could not get default printer name: %v", err)
-                // Continue with empty printer name, Windows will use default
-            }
-            
-            printerName := strings.TrimSpace(printerBuf.String())
-            
-            // Use Print.dll for direct printing - no reliance on content display
-            printDllCmd := fmt.Sprintf(`$printerName = "%s"; $filePath = "%s"; Add-Type -Assembly "System.Drawing"; Add-Type -Assembly "System.Windows.Forms"; $printDoc = New-Object System.Drawing.Printing.PrintDocument; $printDoc.PrinterSettings.PrinterName = $printerName; $printDoc.PrintPage += { param($sender, $args) $webBrowser = New-Object System.Windows.Forms.WebBrowser; $webBrowser.DocumentText = Get-Content $filePath -Raw; $webBrowser.DrawToBitmap($args.Graphics, "0,0,$($webBrowser.Width),$($webBrowser.Height)") }; $printDoc.Print()`, printerName, absolutePath)
-            
-            log.Printf("Executing PowerShell direct print command")
-            psDllCmd := exec.Command("powershell", "-Command", printDllCmd)
-            
-            var psDllOutput, psDllError bytes.Buffer
-            psDllCmd.Stdout = &psDllOutput
-            psDllCmd.Stderr = &psDllError
-            
-            if err := psDllCmd.Run(); err != nil {
-                log.Printf("Method 3 ERROR: PowerShell direct printing failed: %v", err)
-                log.Printf("Method 3 STDERR: %s", psDllError.String())
-                
-                // Last resort - open in browser
-                log.Printf("Falling back to browser method...")
-                browserCmd := exec.Command("cmd", "/c", "start", absolutePath)
-                if err := browserCmd.Run(); err != nil {
-                    log.Printf("ERROR: All print methods failed. Last error: %v", err)
-                    // Don't remove the file so the user can access it
-                    return fmt.Errorf("all print methods failed: %w", err)
-                }
-                
-                // Wait a bit longer for the browser to open
-                log.Printf("Opened receipt in browser. Waiting for user to print...")
-                time.Sleep(5 * time.Second)
-            } else {
-                log.Printf("Method 3: PowerShell direct printing succeeded")
-                // Wait for printing to complete
-                time.Sleep(5 * time.Second)
-            }
-        } else {
-            log.Printf("Edge printing succeeded")
-            // Wait for printing to complete
-            time.Sleep(5 * time.Second)
-        }
-        
-    } else {
-        // For non-Windows systems, use the default temp file approach
-        tmpFile, err := ioutil.TempFile("", "receipt-*.html")
-        if err != nil {
-            log.Printf("ERROR: Failed to create temp file: %v", err)
-            return fmt.Errorf("error creating temp file: %w", err)
-        }
-        tmpFilePath = tmpFile.Name()
-        log.Printf("Created temporary file: %s", tmpFilePath)
-        
-        // Write the HTML content to the temp file
-        log.Printf("Writing HTML content to file")
-        if _, err := tmpFile.Write([]byte(html)); err != nil {
-            log.Printf("ERROR: Failed to write to temp file: %v", err)
-            tmpFile.Close()
-            os.Remove(tmpFilePath)
-            return fmt.Errorf("error writing to temp file: %w", err)
-        }
-        if err := tmpFile.Close(); err != nil {
-            log.Printf("ERROR: Failed to close temp file: %v", err)
-            os.Remove(tmpFilePath)
-            return fmt.Errorf("error closing temp file: %w", err)
-        }
-        
-        // Print the file using the operating system's default printer
-        var cmd *exec.Cmd
-        if runtime.GOOS == "darwin" {
-            // On macOS, use lp command
-            log.Printf("Using lp command to print on macOS")
-            cmd = exec.Command("lp", tmpFilePath)
-        } else {
-            // On Linux, use lp command
-            log.Printf("Using lp command to print on Linux")
-            cmd = exec.Command("lp", tmpFilePath)
-        }
-        
-        // Execute the print command
-        var outputBuf, errorBuf bytes.Buffer
-        cmd.Stdout = &outputBuf
-        cmd.Stderr = &errorBuf
-        
-        log.Printf("Executing print command")
-        if err := cmd.Run(); err != nil {
-            log.Printf("ERROR: Print command failed: %v", err)
-            log.Printf("STDERR: %s", errorBuf.String())
-            return fmt.Errorf("error printing receipt: %w, stderr: %s", err, errorBuf.String())
-        }
-        
-        log.Printf("Print command executed successfully")
-        
-        // Add a small delay to ensure the print job is sent before we delete the file
-        log.Printf("Waiting for print job to complete")
-        time.Sleep(2 * time.Second)
-    }
-    
-    // Return success BEFORE file cleanup
-    log.Printf("=== PRINT RECEIPT FUNCTION COMPLETED SUCCESSFULLY ===")
-    
-    // Schedule cleanup in a goroutine so it doesn't block the response
-    go func(filePath string) {
-        // Wait longer before attempting to delete - important!
-        time.Sleep(20 * time.Second)
-        log.Printf("Attempting to clean up temporary file: %s", filePath)
-        
-        // Try multiple times to delete the file
-        for i := 0; i < 3; i++ {
-            err := os.Remove(filePath)
-            if err == nil {
-                log.Printf("Successfully removed temporary file")
-                return
-            }
-            
-            log.Printf("Failed to remove file (attempt %d): %v", i+1, err)
-            // Wait before trying again
-            time.Sleep(5 * time.Second)
-        }
-        
-        log.Printf("WARNING: Could not remove temporary file after 3 attempts")
-    }(tmpFilePath)
-    
-    return nil
+	if runtime.GOOS == "windows" {
+		// Create temp file in the system temp directory which should be writable
+		tmpFile, err := ioutil.TempFile(os.TempDir(), "receipt-*.html")
+		if err != nil {
+			log.Printf("ERROR: Failed to create temp file: %v", err)
+			return fmt.Errorf("error creating temp file: %w", err)
+		}
+		tmpFilePath = tmpFile.Name()
+		log.Printf("Created temporary file at system temp location: %s", tmpFilePath)
+		
+		// IMPORTANT: Close the file before writing to avoid file locking issues
+		if err := tmpFile.Close(); err != nil {
+			log.Printf("ERROR: Failed to close temp file: %v", err)
+			os.Remove(tmpFilePath)
+			return fmt.Errorf("error closing temp file: %w", err)
+		}
+		
+		// Write the HTML content directly to the file path
+		log.Printf("Writing HTML content to file (%d bytes)", len(html))
+		if err := ioutil.WriteFile(tmpFilePath, []byte(html), 0644); err != nil {
+			log.Printf("ERROR: Failed to write to temp file: %v", err)
+			os.Remove(tmpFilePath)
+			return fmt.Errorf("error writing to temp file: %w", err)
+		}
+		
+		// Get absolute path for the file
+		absolutePath, err := filepath.Abs(tmpFilePath)
+		if err != nil {
+			log.Printf("ERROR: Failed to get absolute path: %v", err)
+			os.Remove(tmpFilePath)
+			return fmt.Errorf("error getting absolute path: %w", err)
+		}
+		log.Printf("Absolute path: %s", absolutePath)
+		
+		// Enhanced error handling and printing approach for Windows
+		
+		// First try: Use default browser for reliable printing
+		log.Printf("Trying Method 1: Open with default browser and auto-print...")
+		browserCmd := exec.Command("cmd", "/c", "start", "", absolutePath)
+		
+		var outputBuf, errorBuf bytes.Buffer
+		browserCmd.Stdout = &outputBuf
+		browserCmd.Stderr = &errorBuf
+		
+		if err := browserCmd.Run(); err != nil {
+			log.Printf("Method 1 ERROR: Browser printing failed: %v", err)
+			log.Printf("Method 1 STDERR: %s", errorBuf.String())
+			
+			// Second try: Use mshtml approach which is more direct
+			log.Printf("Trying Method 2: MSHtml printing approach...")
+			
+			// Create a VBS script to handle the printing
+			vbsContent := fmt.Sprintf(`
+Set objFSO = CreateObject("Scripting.FileSystemObject")
+Set objHTMLFile = objFSO.OpenTextFile("%s", 1)
+htmlContent = objHTMLFile.ReadAll
+objHTMLFile.Close
+
+Set objIE = CreateObject("InternetExplorer.Application")
+objIE.Silent = True
+objIE.Navigate "about:blank"
+While objIE.ReadyState <> 4 : WScript.Sleep 100 : Wend
+objIE.Document.Write htmlContent
+objIE.Document.Close
+
+' Wait for page to fully load
+WScript.Sleep 1000
+
+' Print the document
+objIE.ExecWB 6, 1  ' 6 = Print, 1 = Show dialog
+
+' Wait for printing to complete
+WScript.Sleep 3000
+
+' Close IE
+objIE.Quit
+`, strings.ReplaceAll(absolutePath, "\\", "\\\\"))
+			
+			// Write the VBS script to a temporary file
+			vbsFile, err := ioutil.TempFile(os.TempDir(), "print-*.vbs")
+			if err != nil {
+				log.Printf("ERROR: Failed to create VBS script file: %v", err)
+				os.Remove(tmpFilePath)
+				return fmt.Errorf("error creating VBS script: %w", err)
+			}
+			vbsPath := vbsFile.Name()
+			if _, err := vbsFile.Write([]byte(vbsContent)); err != nil {
+				log.Printf("ERROR: Failed to write VBS script: %v", err)
+				vbsFile.Close()
+				os.Remove(vbsPath)
+				os.Remove(tmpFilePath)
+				return fmt.Errorf("error writing VBS script: %w", err)
+			}
+			vbsFile.Close()
+			
+			// Run the VBS script
+			vbsCmd := exec.Command("cscript", "//NoLogo", vbsPath)
+			if err := vbsCmd.Run(); err != nil {
+				log.Printf("Method 2 ERROR: VBS printing failed: %v", err)
+				
+				// Third try: Use SumatraPDF if available (commonly used for receipt printing)
+				log.Printf("Trying Method 3: SumatraPDF if available...")
+				
+				// Check if SumatraPDF is in Program Files
+				sumatraPaths := []string{
+					"C:\\Program Files\\SumatraPDF\\SumatraPDF.exe",
+					"C:\\Program Files (x86)\\SumatraPDF\\SumatraPDF.exe",
+				}
+				
+				sumatraFound := false
+				for _, path := range sumatraPaths {
+					if _, err := os.Stat(path); err == nil {
+						sumatraCmd := exec.Command(path, "-print-to-default", "-silent", absolutePath)
+						if err := sumatraCmd.Run(); err != nil {
+							log.Printf("Method 3 ERROR: SumatraPDF printing failed: %v", err)
+						} else {
+							log.Printf("Method 3: SumatraPDF printing succeeded")
+							sumatraFound = true
+							break
+						}
+					}
+				}
+				
+				if !sumatraFound {
+					log.Printf("ERROR: All print methods failed.")
+					os.Remove(vbsPath)
+					os.Remove(tmpFilePath)
+					return fmt.Errorf("all print methods failed")
+				}
+				
+				// Clean up VBS file
+				os.Remove(vbsPath)
+			} else {
+				log.Printf("Method 2: VBS printing succeeded")
+				os.Remove(vbsPath)
+			}
+		} else {
+			log.Printf("Method 1: Browser printing succeeded")
+		}
+		
+		// Wait longer for printing to complete before cleaning up
+		log.Printf("Waiting for print job to complete...")
+		time.Sleep(10 * time.Second)
+		
+	} else {
+		// For non-Windows systems, use the default temp file approach
+		tmpFile, err := ioutil.TempFile("", "receipt-*.html")
+		if err != nil {
+			log.Printf("ERROR: Failed to create temp file: %v", err)
+			return fmt.Errorf("error creating temp file: %w", err)
+		}
+		tmpFilePath = tmpFile.Name()
+		log.Printf("Created temporary file: %s", tmpFilePath)
+		
+		// Write the HTML content to the temp file
+		log.Printf("Writing HTML content to file")
+		if _, err := tmpFile.Write([]byte(html)); err != nil {
+			log.Printf("ERROR: Failed to write to temp file: %v", err)
+			tmpFile.Close()
+			os.Remove(tmpFilePath)
+			return fmt.Errorf("error writing to temp file: %w", err)
+		}
+		if err := tmpFile.Close(); err != nil {
+			log.Printf("ERROR: Failed to close temp file: %v", err)
+			os.Remove(tmpFilePath)
+			return fmt.Errorf("error closing temp file: %w", err)
+		}
+		
+		// Print the file using the operating system's default printer
+		var cmd *exec.Cmd
+		if runtime.GOOS == "darwin" {
+			// On macOS, use lp command
+			log.Printf("Using lp command to print on macOS")
+			cmd = exec.Command("lp", tmpFilePath)
+		} else {
+			// On Linux, use lp command
+			log.Printf("Using lp command to print on Linux")
+			cmd = exec.Command("lp", tmpFilePath)
+		}
+		
+		// Execute the print command
+		var outputBuf, errorBuf bytes.Buffer
+		cmd.Stdout = &outputBuf
+		cmd.Stderr = &errorBuf
+		
+		log.Printf("Executing print command")
+		if err := cmd.Run(); err != nil {
+			log.Printf("ERROR: Print command failed: %v", err)
+			log.Printf("STDERR: %s", errorBuf.String())
+			return fmt.Errorf("error printing receipt: %w, stderr: %s", err, errorBuf.String())
+		}
+		
+		log.Printf("Print command executed successfully")
+		
+		// Add a small delay to ensure the print job is sent before we delete the file
+		log.Printf("Waiting for print job to complete")
+		time.Sleep(2 * time.Second)
+	}
+	
+	// Clean up temporary file
+	log.Printf("Cleaning up temporary file: %s", tmpFilePath)
+	if err := os.Remove(tmpFilePath); err != nil {
+		log.Printf("WARNING: Failed to remove temporary file: %v", err)
+	} else {
+		log.Printf("Successfully removed temporary file")
+	}
+	
+	log.Printf("=== PRINT RECEIPT FUNCTION COMPLETED SUCCESSFULLY ===")
+	return nil
 }
 
 // handlePrintReceipt processes print requests
 func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
-    log.Printf("Received print receipt request from %s", r.RemoteAddr)
-    
-    // Only accept POST requests
-    if r.Method != http.MethodPost {
-        log.Printf("ERROR: Received non-POST request method: %s", r.Method)
-        writeJSONError(w, http.StatusMethodNotAllowed, errors.New("only POST method is allowed"))
-        return
-    }
+	log.Printf("Received print receipt request from %s", r.RemoteAddr)
+	
+	// Only accept POST requests
+	if r.Method != http.MethodPost {
+		log.Printf("ERROR: Received non-POST request method: %s", r.Method)
+		writeJSONError(w, http.StatusMethodNotAllowed, errors.New("only POST method is allowed"))
+		return
+	}
 
-    // Decode the request body
-    var receipt ReceiptData
-    if err := json.NewDecoder(r.Body).Decode(&receipt); err != nil {
-        log.Printf("ERROR: Failed to decode request body: %v", err)
-        writeJSONError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
-        return
-    }
-    
-    log.Printf("Processing receipt - Transaction ID: %s, Location: %v, Items: %d", 
-        receipt.TransactionID, receipt.Location, len(receipt.Items))
+	// Decode the request body
+	var receipt ReceiptData
+	if err := json.NewDecoder(r.Body).Decode(&receipt); err != nil {
+		log.Printf("ERROR: Failed to decode request body: %v", err)
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
+		return
+	}
+	
+	log.Printf("Processing receipt - Transaction ID: %s, Location: %v, Items: %d", 
+		receipt.TransactionID, receipt.Location, len(receipt.Items))
 
-    // Generate HTML for the receipt
-    html := generateReceiptHTML(receipt)
-    log.Printf("Generated HTML receipt content (%d bytes)", len(html))
+	// Generate HTML for the receipt
+	html := generateReceiptHTML(receipt)
+	log.Printf("Generated HTML receipt content (%d bytes)", len(html))
 
-    // Print the receipt
-    if err := printReceipt(html); err != nil {
-        log.Printf("ERROR: Failed to print receipt: %v", err)
-        writeJSONError(w, http.StatusInternalServerError, err)
-        return
-    }
+	// Print the receipt
+	if err := printReceipt(html); err != nil {
+		log.Printf("ERROR: Failed to print receipt: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
 
-    // Return success response - explicitly set 200 status code
-    log.Printf("Receipt printed successfully")
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusOK)  // <-- Explicitly set 200 status code
-    json.NewEncoder(w).Encode(map[string]interface{}{
-        "status":  "success",
-        "message": "Receipt printed successfully",
-    })
+	log.Printf("Receipt printed successfully")
+	// Return success response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "success",
+		"message": "Receipt printed successfully",
+	})
 }
 
 func main() {
-    // Set up logging
-    log.SetOutput(os.Stdout)
-    log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
-    log.Printf("Starting Receipt and Scanner Application")
-    
-    mux := http.NewServeMux()
-    mux.HandleFunc("/scanner/scan", scannerHandler)
-    mux.HandleFunc("/print/receipt", handlePrintReceipt)
+	// Set up logging
+	log.SetOutput(os.Stdout)
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
+	log.Printf("Starting Receipt and Scanner Application")
+	
+	mux := http.NewServeMux()
+	mux.HandleFunc("/scanner/scan", scannerHandler)
+	mux.HandleFunc("/print/receipt", handlePrintReceipt)
 
-    handler := corsMiddleware(mux)
-    port := 3500 // change port will break front end so don't
-    log.Printf("Starting server on http://localhost:%d", port)
-    if err := http.ListenAndServe(fmt.Sprintf(":%d", port), handler); err != nil {
-        log.Fatal(err)
-    }
+	handler := corsMiddleware(mux)
+	port := 3500 // change port will break front end so don't
+	log.Printf("Starting server on http://localhost:%d", port)
+	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), handler); err != nil {
+		log.Fatal(err)
+	}
 }
