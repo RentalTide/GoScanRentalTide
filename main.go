@@ -549,6 +549,50 @@ func printReceipt(html string) error {
 		if err != nil {
 			return fmt.Errorf("error writing to temp file: %w", err)
 		}
+		
+		// Create a simple VBScript that will print silently
+		vbsContent := fmt.Sprintf(`
+		Set objFSO = CreateObject("Scripting.FileSystemObject")
+		If objFSO.FileExists("%s") Then
+			Set objShell = CreateObject("WScript.Shell")
+			Set objIE = CreateObject("InternetExplorer.Application")
+			objIE.Navigate "%s"
+			objIE.Visible = False
+			
+			' Wait for page to load
+			Do While objIE.ReadyState <> 4 Or objIE.Busy
+				WScript.Sleep 100
+			Loop
+			
+			' Print silently
+			objIE.ExecWB 6, 1
+			
+			' Wait for printing to complete
+			WScript.Sleep 3000
+			
+			' Close IE
+			objIE.Quit
+		End If
+		`, strings.ReplaceAll(tmpFilePath, "\\", "\\\\"), strings.ReplaceAll(tmpFilePath, "\\", "\\\\"))
+		
+		// Write VBS script to file
+		vbsPath := filepath.Join(receiptsDir, fmt.Sprintf("print-%s.vbs", timestamp))
+		if err := ioutil.WriteFile(vbsPath, []byte(vbsContent), 0644); err != nil {
+			return fmt.Errorf("error writing VBS script: %w", err)
+		}
+		defer os.Remove(vbsPath) // Clean up the VBS script
+		
+		// Run the VBS script
+		cmd := exec.Command("cscript", "//NoLogo", vbsPath)
+		var outputBuf, errorBuf bytes.Buffer
+		cmd.Stdout = &outputBuf
+		cmd.Stderr = &errorBuf
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("error executing VBS script: %w, stderr: %s", err, errorBuf.String())
+		}
+		
+		// Add a delay to ensure printing completes before cleaning up
+		time.Sleep(5 * time.Second)
 	} else {
 		// For non-Windows systems, use the default temp file approach
 		tmpFile, err := ioutil.TempFile("", "receipt-*.html")
@@ -567,64 +611,34 @@ func printReceipt(html string) error {
 			os.Remove(tmpFilePath)
 			return fmt.Errorf("error closing temp file: %w", err)
 		}
+		
+		// Print the file using the operating system's default printer
+		var cmd *exec.Cmd
+		if runtime.GOOS == "darwin" {
+			// On macOS, use lp command
+			cmd = exec.Command("lp", tmpFilePath)
+		} else {
+			// On Linux, use lp command
+			cmd = exec.Command("lp", tmpFilePath)
+		}
+		
+		// Execute the print command
+		var outputBuf, errorBuf bytes.Buffer
+		cmd.Stdout = &outputBuf
+		cmd.Stderr = &errorBuf
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("error printing receipt: %w, stderr: %s", err, errorBuf.String())
+		}
+		
+		// Add a small delay to ensure the print job is sent before we delete the file
+		time.Sleep(2 * time.Second)
 	}
-
+	
 	// Create a deferred cleanup to remove the temp file after printing
 	defer os.Remove(tmpFilePath)
 
-	// Verify the file exists before trying to print
-	if _, err := os.Stat(tmpFilePath); os.IsNotExist(err) {
-		return fmt.Errorf("temp file does not exist at path: %s", tmpFilePath)
-	}
-
-	// Print the file using the operating system's default printer
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		// On Windows, use SumatraPDF with silent print option
-		// First, check if SumatraPDF is installed
-		sumatra := `C:\Program Files\SumatraPDF\SumatraPDF.exe`
-		if _, err := os.Stat(sumatra); os.IsNotExist(err) {
-			// If SumatraPDF is not available, try using Microsoft Print to PDF with PowerShell
-			printScript := fmt.Sprintf(`$printer = Get-WmiObject -Query "SELECT * FROM Win32_Printer WHERE Default=$true"
-$printProcess = New-Object -ComObject "Shell.Application"
-$printProcess.ShellExecute("%s", "", "", "print", 0`, tmpFilePath)
-			
-			// Create a temporary PowerShell script
-			psFile := filepath.Join(filepath.Dir(tmpFilePath), "print-"+filepath.Base(tmpFilePath)+".ps1")
-			if err := ioutil.WriteFile(psFile, []byte(printScript), 0644); err != nil {
-				return fmt.Errorf("error creating PowerShell script: %w", err)
-			}
-			defer os.Remove(psFile)
-			
-			// Execute the PowerShell script
-			cmd = exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-File", psFile)
-		} else {
-			// Use SumatraPDF in silent print mode
-			cmd = exec.Command(sumatra, "-print-to-default", "-silent", tmpFilePath)
-		}
-	case "darwin":
-		// On macOS, use lp command
-		cmd = exec.Command("lp", tmpFilePath)
-	default:
-		// On Linux, use lp command
-		cmd = exec.Command("lp", tmpFilePath)
-	}
-
-	// Execute the print command
-	var outputBuf, errorBuf bytes.Buffer
-	cmd.Stdout = &outputBuf
-	cmd.Stderr = &errorBuf
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("error printing receipt: %w, stderr: %s", err, errorBuf.String())
-	}
-
-	// Add a small delay to ensure the print job is sent before we delete the file
-	time.Sleep(2 * time.Second)
-
 	return nil
 }
-
 // handlePrintReceipt processes print requests
 func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
 	// Only accept POST requests
