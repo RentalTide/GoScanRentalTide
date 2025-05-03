@@ -533,6 +533,7 @@ func printReceipt(html string) error {
     log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
     
     var tmpFilePath string
+    var shouldDeleteFile bool = true
 
     if runtime.GOOS == "windows" {
         // Create temp file in the system temp directory
@@ -590,6 +591,8 @@ func printReceipt(html string) error {
         edgeCmd.Stderr = &edgeErrorBuf
         
         log.Printf("Executing Edge print command")
+        printSuccess := false
+        
         if err := edgeCmd.Run(); err != nil {
             log.Printf("Edge method ERROR: %v", err)
             log.Printf("Edge method STDERR: %s", edgeErrorBuf.String())
@@ -628,24 +631,36 @@ func printReceipt(html string) error {
                 browserCmd := exec.Command("cmd", "/c", "start", absolutePath)
                 if err := browserCmd.Run(); err != nil {
                     log.Printf("ERROR: All print methods failed. Last error: %v", err)
-                    // Don't remove the file so the user can access it
+                    // Keep the file and don't try to delete it
+                    shouldDeleteFile = false
                     return fmt.Errorf("all print methods failed: %w", err)
+                } else {
+                    // Browser opened successfully
+                    printSuccess = true
+                    log.Printf("Opened receipt in browser. Waiting for user to print...")
+                    time.Sleep(30 * time.Second)
                 }
-                
-                // Wait a bit longer for the browser to open
-                log.Printf("Opened receipt in browser. Waiting for user to print...")
-                time.Sleep(20 * time.Second)
             } else {
+                // PowerShell direct printing succeeded
+                printSuccess = true
                 log.Printf("Method 3: PowerShell direct printing succeeded")
                 // Wait for printing to complete
-                time.Sleep(8 * time.Second)
+                time.Sleep(15 * time.Second)
             }
         } else {
+            // Edge printing succeeded
+            printSuccess = true
             log.Printf("Edge printing succeeded")
             // Wait for printing to complete
-            time.Sleep(5 * time.Second)
+            time.Sleep(10 * time.Second)
         }
         
+        // Only return success if one of the print methods succeeded
+        if !printSuccess {
+            shouldDeleteFile = false
+            return errors.New("failed to print receipt using any available method")
+        }
+
 	} else {
 		// For non-Windows systems, use the default temp file approach
 		tmpFile, err := ioutil.TempFile("", "receipt-*.html")
@@ -691,25 +706,37 @@ func printReceipt(html string) error {
 		if err := cmd.Run(); err != nil {
 			log.Printf("ERROR: Print command failed: %v", err)
 			log.Printf("STDERR: %s", errorBuf.String())
+			shouldDeleteFile = false
 			return fmt.Errorf("error printing receipt: %w, stderr: %s", err, errorBuf.String())
 		}
 		
 		log.Printf("Print command executed successfully")
 		
-		// Add a small delay to ensure the print job is sent before we delete the file
+		// Add a larger delay to ensure the print job is sent before we delete the file
 		log.Printf("Waiting for print job to complete")
-		time.Sleep(2 * time.Second)
+		time.Sleep(5 * time.Second)
 	}
 	
-	// Clean up temporary file
-	log.Printf("Cleaning up temporary file: %s", tmpFilePath)
-	if err := os.Remove(tmpFilePath); err != nil {
-		log.Printf("WARNING: Failed to remove temporary file: %v", err)
-	} else {
-		log.Printf("Successfully removed temporary file")
-	}
-	
+	// Return success now - before file cleanup
 	log.Printf("=== PRINT RECEIPT FUNCTION COMPLETED SUCCESSFULLY ===")
+	
+	// Clean up temporary file only if we should
+	if shouldDeleteFile {
+        // We'll clean up in a separate goroutine to allow the HTTP response to return first
+        go func(filePath string) {
+            // Wait longer before removing the file
+            time.Sleep(10 * time.Second)
+            log.Printf("Cleaning up temporary file: %s", filePath)
+            if err := os.Remove(filePath); err != nil {
+                log.Printf("WARNING: Failed to remove temporary file: %v", err)
+            } else {
+                log.Printf("Successfully removed temporary file")
+            }
+        }(tmpFilePath)
+    } else {
+        log.Printf("Keeping temporary file for debugging: %s", tmpFilePath)
+    }
+	
 	return nil
 }
 
