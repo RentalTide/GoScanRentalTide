@@ -10,12 +10,13 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"encoding/base64"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
 	"time"
-
+	"github.com/jung-kurt/gofpdf"
 	"go.bug.st/serial"
 )
 
@@ -324,15 +325,9 @@ func scannerHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// New function to generate ESC/POS commands for receipt
-func generateESCPOSReceipt(receipt ReceiptData) []byte {
-	var buf bytes.Buffer
-	
-	// ESC/POS initialization
-	buf.Write([]byte{0x1B, 0x40}) // Initialize printer
-	buf.Write([]byte{0x1B, 0x21, 0x01}) // Set font to small
-	
-	// Get location name
+// generateReceiptPDF creates PDF content for the receipt
+func generateReceiptHTML(receipt ReceiptData) string {
+
 	locationName := ""
 	switch loc := receipt.Location.(type) {
 	case string:
@@ -342,151 +337,169 @@ func generateESCPOSReceipt(receipt ReceiptData) []byte {
 			locationName = name
 		}
 	}
+
+	// Create a new PDF with specific measurements
+	pdf := gofpdf.New("P", "mm", "", "") // Initialize with empty format
+	pdf.AddPageFormat("P", gofpdf.SizeType{Wd: 80, Ht: 297}) // Custom size: 80mm width (standard receipt width) x 297mm height
+	pdf.SetAutoPageBreak(true, 10)
+	pdf.AddPage()
+
+	// Set fonts
+	pdf.SetFont("Arial", "B", 12)
+	pdf.SetTextColor(0, 0, 0)
+
+	// Header
+	pdf.CellFormat(80, 10, locationName, "", 1, "C", false, 0, "")
+	pdf.SetFont("Arial", "", 10)
+	pdf.CellFormat(80, 6, receipt.Date, "", 1, "C", false, 0, "")
 	
-	// Write header - center aligned
-	buf.Write([]byte{0x1B, 0x61, 0x01}) // Center alignment
-	buf.Write([]byte(locationName + "\n"))
-	buf.Write([]byte(receipt.Date + "\n"))
 	if receipt.CustomerName != nil {
-		buf.Write([]byte("Customer: " + *receipt.CustomerName + "\n"))
+		pdf.CellFormat(80, 6, "Customer: "+*receipt.CustomerName, "", 1, "C", false, 0, "")
 	}
-	
-	// Write divider
-	buf.Write([]byte{0x1B, 0x61, 0x00}) // Left alignment
-	buf.Write([]byte("--------------------------------\n"))
-	
-	// Transaction info
-	buf.Write([]byte("Transaction ID: " + receipt.TransactionID + "\n"))
-	buf.Write([]byte("Payment: " + strings.Title(receipt.PaymentType) + "\n"))
-	
+
 	// Divider
-	buf.Write([]byte("--------------------------------\n"))
-	
+	pdf.Ln(2)
+	pdf.Line(10, pdf.GetY(), 70, pdf.GetY())
+	pdf.Ln(3)
+
+	// Transaction info
+	pdf.CellFormat(80, 6, "Transaction ID: "+receipt.TransactionID, "", 1, "L", false, 0, "")
+	pdf.CellFormat(80, 6, "Payment: "+strings.Title(receipt.PaymentType), "", 1, "L", false, 0, "")
+
+	// Divider
+	pdf.Ln(2)
+	pdf.Line(10, pdf.GetY(), 70, pdf.GetY())
+	pdf.Ln(3)
+
 	// Items header
-	buf.Write([]byte{0x1B, 0x21, 0x08}) // Bold
-	buf.Write([]byte("ITEMS\n"))
-	buf.Write([]byte{0x1B, 0x21, 0x01}) // Regular text
-	
+	pdf.SetFont("Arial", "B", 10)
+	pdf.CellFormat(80, 6, "ITEMS", "", 1, "L", false, 0, "")
+	pdf.Ln(1)
+	pdf.SetFont("Arial", "", 9)
+
 	// Items
 	for _, item := range receipt.Items {
 		name, _ := item["name"].(string)
 		quantity, _ := item["quantity"].(float64)
 		price, _ := item["price"].(float64)
-		total := quantity * price
 		sku, _ := item["sku"].(string)
+
+		pdf.SetFont("Arial", "B", 9)
+		pdf.CellFormat(80, 5, name, "", 1, "L", false, 0, "")
+		pdf.SetFont("Arial", "", 9)
 		
-		buf.Write([]byte{0x1B, 0x21, 0x08}) // Bold
-		buf.Write([]byte(name + "\n"))
-		buf.Write([]byte{0x1B, 0x21, 0x01}) // Regular
+		// Item details with quantity and price
+		pdf.CellFormat(40, 5, fmt.Sprintf("%.0f x $%.2f", quantity, price), "", 0, "L", false, 0, "")
+		pdf.CellFormat(40, 5, fmt.Sprintf("$%.2f", quantity*price), "", 1, "R", false, 0, "")
 		
-		// Quantity and price
-		qtyLine := fmt.Sprintf("  %.0f x $%.2f", quantity, price)
-		// Pad spaces to align total to the right
-		spaces := 32 - len(qtyLine) - len(fmt.Sprintf("$%.2f", total))
-		for i := 0; i < spaces; i++ {
-			qtyLine += " "
-		}
-		qtyLine += fmt.Sprintf("$%.2f\n", total)
-		buf.Write([]byte(qtyLine))
-		
+		// SKU if available
 		if sku != "" {
-			buf.Write([]byte("  SKU: " + sku + "\n"))
+			pdf.SetFont("Arial", "", 8)
+			pdf.CellFormat(80, 4, "SKU: "+sku, "", 1, "L", false, 0, "")
 		}
+		pdf.Ln(1)
 	}
-	
+
 	// Divider
-	buf.Write([]byte("--------------------------------\n"))
-	
-	// Totals
-	writeTotal := func(label string, value float64, bold bool) {
-		line := label
-		spaces := 32 - len(label) - len(fmt.Sprintf("$%.2f", value))
-		for i := 0; i < spaces; i++ {
-			line += " "
-		}
-		line += fmt.Sprintf("$%.2f\n", value)
-		
-		if bold {
-			buf.Write([]byte{0x1B, 0x21, 0x08}) // Bold
-		}
-		buf.Write([]byte(line))
-		if bold {
-			buf.Write([]byte{0x1B, 0x21, 0x01}) // Regular
-		}
-	}
-	
-	writeTotal("Subtotal:", receipt.Subtotal, false)
-	
-	// Add discount if applicable
+	pdf.Line(10, pdf.GetY(), 70, pdf.GetY())
+	pdf.Ln(3)
+
+	// Totals section
+	pdf.SetFont("Arial", "", 9)
+	pdf.CellFormat(40, 5, "Subtotal:", "", 0, "L", false, 0, "")
+	pdf.CellFormat(40, 5, fmt.Sprintf("$%.2f", receipt.Subtotal), "", 1, "R", false, 0, "")
+
+	// Discount if applicable
 	if receipt.DiscountAmount != nil && receipt.DiscountPercentage != nil {
-		discountLabel := fmt.Sprintf("Discount (%.0f%%):", *receipt.DiscountPercentage)
-		writeTotal(discountLabel, -*receipt.DiscountAmount, false)
+		pdf.CellFormat(40, 5, fmt.Sprintf("Discount (%.0f%%):", *receipt.DiscountPercentage), "", 0, "L", false, 0, "")
+		pdf.CellFormat(40, 5, fmt.Sprintf("-$%.2f", *receipt.DiscountAmount), "", 1, "R", false, 0, "")
 	}
+
+	// Tax breakdown
+	pdf.CellFormat(40, 5, "Tax:", "", 0, "L", false, 0, "")
+	pdf.CellFormat(40, 5, fmt.Sprintf("$%.2f", receipt.Tax), "", 1, "R", false, 0, "")
 	
-	// Add tax
-	writeTotal("Tax:", receipt.Tax, false)
-	buf.Write([]byte(fmt.Sprintf("  GST (5%%): $%.2f\n", receipt.Subtotal*0.05)))
-	buf.Write([]byte(fmt.Sprintf("  PST (7%%): $%.2f\n", receipt.Subtotal*0.07)))
+	pdf.SetFont("Arial", "", 8)
+	pdf.CellFormat(40, 4, "GST (5%):", "", 0, "L", false, 0, "")
+	pdf.CellFormat(40, 4, fmt.Sprintf("$%.2f", receipt.Subtotal*0.05), "", 1, "R", false, 0, "")
 	
-	// Add refund if applicable
+	pdf.CellFormat(40, 4, "PST (7%):", "", 0, "L", false, 0, "")
+	pdf.CellFormat(40, 4, fmt.Sprintf("$%.2f", receipt.Subtotal*0.07), "", 1, "R", false, 0, "")
+	pdf.SetFont("Arial", "", 9)
+
+	// Refund if applicable
 	if receipt.RefundAmount != nil && *receipt.RefundAmount > 0 {
-		writeTotal("Refund:", -*receipt.RefundAmount, false)
+		pdf.CellFormat(40, 5, "Refund:", "", 0, "L", false, 0, "")
+		pdf.CellFormat(40, 5, fmt.Sprintf("-$%.2f", *receipt.RefundAmount), "", 1, "R", false, 0, "")
 	}
-	
-	// Add tip if applicable
+
+	// Tip if applicable
 	if receipt.Tip != nil && *receipt.Tip > 0 {
-		writeTotal("Tip:", *receipt.Tip, false)
+		pdf.CellFormat(40, 5, "Tip:", "", 0, "L", false, 0, "")
+		pdf.CellFormat(40, 5, fmt.Sprintf("$%.2f", *receipt.Tip), "", 1, "R", false, 0, "")
 	}
-	
-	// Total
-	buf.Write([]byte{0x1B, 0x45, 0x01}) // Emphasize on
-	writeTotal("TOTAL:", receipt.Total, true)
-	buf.Write([]byte{0x1B, 0x45, 0x00}) // Emphasize off
-	
-	// Cash payment details
+
+	// Total (highlighted)
+	pdf.Ln(2)
+	pdf.SetFillColor(245, 245, 245)
+	pdf.SetFont("Arial", "B", 10)
+	pdf.CellFormat(40, 7, "TOTAL:", "1", 0, "L", true, 0, "")
+	pdf.CellFormat(40, 7, fmt.Sprintf("$%.2f", receipt.Total), "1", 1, "R", true, 0, "")
+
+	// Cash payment details if applicable
 	if receipt.PaymentType == "cash" && receipt.CashGiven != nil && receipt.ChangeDue != nil {
-		buf.Write([]byte("\n"))
-		writeTotal("Cash:", *receipt.CashGiven, false)
-		writeTotal("Change:", *receipt.ChangeDue, false)
+		pdf.Ln(2)
+		pdf.SetFillColor(248, 248, 248)
+		pdf.SetFont("Arial", "", 9)
+		pdf.CellFormat(40, 5, "Cash:", "", 0, "L", true, 0, "")
+		pdf.CellFormat(40, 5, fmt.Sprintf("$%.2f", *receipt.CashGiven), "", 1, "R", true, 0, "")
+		
+		pdf.CellFormat(40, 5, "Change:", "", 0, "L", true, 0, "")
+		pdf.CellFormat(40, 5, fmt.Sprintf("$%.2f", *receipt.ChangeDue), "", 1, "R", true, 0, "")
 	}
-	
-	// Divider
-	buf.Write([]byte("--------------------------------\n"))
-	
+
 	// Footer
-	buf.Write([]byte{0x1B, 0x61, 0x01}) // Center alignment
-	buf.Write([]byte{0x1B, 0x21, 0x08}) // Bold
-	buf.Write([]byte("Thank you for your purchase!\n"))
-	buf.Write([]byte{0x1B, 0x21, 0x01}) // Regular
-	buf.Write([]byte("Visit us again at " + locationName + "\n\n\n\n"))
-	
-	// Cut paper
-	buf.Write([]byte{0x1D, 0x56, 0x42, 0x00}) // Full cut
-	
-	return buf.Bytes()
+	pdf.Ln(5)
+	pdf.SetFont("Arial", "B", 9)
+	pdf.CellFormat(80, 5, "Thank you for your purchase!", "", 1, "C", false, 0, "")
+	pdf.SetFont("Arial", "", 8)
+	pdf.CellFormat(80, 5, "Visit us again at "+locationName, "", 1, "C", false, 0, "")
+
+	// Get the PDF as a byte array
+	var buf bytes.Buffer
+	err := pdf.Output(&buf)
+	if err != nil {
+		log.Printf("ERROR: Failed to generate PDF: %v", err)
+		return ""
+	}
+
+	// Return the PDF content as a Base64 encoded string
+	return base64.StdEncoding.EncodeToString(buf.Bytes())
 }
 
-// Modified printReceipt function to send ESC/POS directly to printer
-func printReceipt(receipt ReceiptData) error {
+// Note: You'll need to update the printReceipt function to handle PDF data
+
+// printReceipt uses system commands to send HTML content to the default printer
+func printReceipt(html string) error {
+	// Set up logging for the function
 	log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
 	
-	// Generate ESC/POS commands
-	escposCommands := generateESCPOSReceipt(receipt)
-	log.Printf("Generated ESC/POS commands (%d bytes)", len(escposCommands))
-	
+	// Path for the temporary file
+	var tmpFilePath string
+
 	if runtime.GOOS == "windows" {
-		// On Windows, we'll need to write to a file and use Windows' print spooler
-		// Create temp file
-		tmpFile, err := ioutil.TempFile(os.TempDir(), "receipt-*.bin")
+		// Create temp file in the system temp directory which should be writable
+		tmpFile, err := ioutil.TempFile(os.TempDir(), "receipt-*.html")
 		if err != nil {
 			log.Printf("ERROR: Failed to create temp file: %v", err)
 			return fmt.Errorf("error creating temp file: %w", err)
 		}
-		tmpFilePath := tmpFile.Name()
+		tmpFilePath = tmpFile.Name()
 		log.Printf("Created temporary file at system temp location: %s", tmpFilePath)
 		
-		// Write the ESC/POS commands to the temp file
-		if _, err := tmpFile.Write(escposCommands); err != nil {
+		// Write the HTML content to the temp file
+		log.Printf("Writing HTML content to file (%d bytes)", len(html))
+		if _, err := tmpFile.Write([]byte(html)); err != nil {
 			log.Printf("ERROR: Failed to write to temp file: %v", err)
 			tmpFile.Close()
 			os.Remove(tmpFilePath)
@@ -499,170 +512,170 @@ func printReceipt(receipt ReceiptData) error {
 			return fmt.Errorf("error closing temp file: %w", err)
 		}
 		
-		// Get printer name - can be adjusted based on your receipt printer name
-		printerCmd := exec.Command("powershell", "-Command", "Get-WmiObject -Query \"SELECT * FROM Win32_Printer WHERE Default=$true\" | Select-Object -ExpandProperty Name")
-		var printerBuf bytes.Buffer
-		printerCmd.Stdout = &printerBuf
-		
-		if err := printerCmd.Run(); err != nil {
-			log.Printf("WARNING: Could not get default printer name: %v", err)
-			// Continue with empty printer name, Windows will use default
+		// Get absolute path for the file
+		absolutePath, err := filepath.Abs(tmpFilePath)
+		if err != nil {
+			log.Printf("ERROR: Failed to get absolute path: %v", err)
+			os.Remove(tmpFilePath)
+			return fmt.Errorf("error getting absolute path: %w", err)
 		}
+		log.Printf("Absolute path: %s", absolutePath)
 		
-		printerName := strings.TrimSpace(printerBuf.String())
-		log.Printf("Using printer: %s", printerName)
+		// Method 1: Use PowerShell to print with .NET
+		log.Printf("Trying Method 1: .NET Printing via PowerShell...")
+		psCommand := fmt.Sprintf(`Add-Type -AssemblyName PresentationCore; Add-Type -AssemblyName PresentationFramework; Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $printDoc = New-Object System.Drawing.Printing.PrintDocument; $printDoc.DocumentName = '%s'; $printDoc.Print()`, filepath.Base(tmpFilePath))
+		cmd := exec.Command("powershell", "-Command", psCommand)
 		
-		// Try different methods to print to the receipt printer
+		var outputBuf, errorBuf bytes.Buffer
+		cmd.Stdout = &outputBuf
+		cmd.Stderr = &errorBuf
 		
-		// Method 1: Try direct printing with the printer name
-		log.Printf("Trying Method 1: Direct print to printer")
-		printCommand := exec.Command("cmd", "/c", fmt.Sprintf("type \"%s\" > \"%s\"", tmpFilePath, printerName))
-		var outputBuf1, errorBuf1 bytes.Buffer
-		printCommand.Stdout = &outputBuf1
-		printCommand.Stderr = &errorBuf1
-		
-		if err := printCommand.Run(); err != nil {
-			log.Printf("Method 1 ERROR: Failed to print directly: %v", err)
-			log.Printf("Method 1 STDERR: %s", errorBuf1.String())
+		if err := cmd.Run(); err != nil {
+			log.Printf("Method 1 ERROR: Failed to print with .NET: %v", err)
+			log.Printf("Method 1 STDERR: %s", errorBuf.String())
+			log.Printf("Method 1 STDOUT: %s", outputBuf.String())
 			
-			// Method 2: Try using the copy command to LPT1
-			log.Printf("Trying Method 2: Copy to LPT1 port...")
-			copyCmd := exec.Command("cmd", "/c", fmt.Sprintf("copy /b \"%s\" LPT1", tmpFilePath))
-			var outputBuf2, errorBuf2 bytes.Buffer
-			copyCmd.Stdout = &outputBuf2
-			copyCmd.Stderr = &errorBuf2
+			// Try Method 2 if Method 1 fails
+			log.Printf("Trying Method 2: PrintUI.dll approach...")
 			
-			if err := copyCmd.Run(); err != nil {
-				log.Printf("Method 2 ERROR: Copy to LPT1 failed: %v", err)
-				log.Printf("Method 2 STDERR: %s", errorBuf2.String())
+			// Get default printer name
+			printerCmd := exec.Command("powershell", "-Command", "Get-WmiObject -Query \"SELECT * FROM Win32_Printer WHERE Default=$true\" | Select-Object -ExpandProperty Name")
+			var printerBuf bytes.Buffer
+			printerCmd.Stdout = &printerBuf
+			
+			if err := printerCmd.Run(); err != nil {
+				log.Printf("WARNING: Could not get default printer name: %v", err)
+				// Continue with empty printer name, Windows will use default
+			}
+			
+			printerName := strings.TrimSpace(printerBuf.String())
+			printUICmd := fmt.Sprintf("rundll32 printui.dll,PrintUIEntry /k /n\"%s\" /f\"%s\"", printerName, absolutePath)
+			log.Printf("Executing command: %s", printUICmd)
+			
+			cmdPrintUI := exec.Command("cmd", "/c", printUICmd)
+			if err := cmdPrintUI.Run(); err != nil {
+				log.Printf("Method 2 ERROR: PrintUI approach failed: %v", err)
 				
-				// Method 3: Try using printui.dll approach
-				log.Printf("Trying Method 3: PrintUI.dll approach...")
-				printUICmd := exec.Command("cmd", "/c", 
-					fmt.Sprintf("rundll32 printui.dll,PrintUIEntry /k /n\"%s\" /f\"%s\" /j\"Raw Print\"", 
-					printerName, tmpFilePath))
-				var outputBuf3, errorBuf3 bytes.Buffer
-				printUICmd.Stdout = &outputBuf3
-				printUICmd.Stderr = &errorBuf3
-				
-				if err := printUICmd.Run(); err != nil {
-					log.Printf("Method 3 ERROR: PrintUI approach failed: %v", err)
-					log.Printf("Method 3 STDERR: %s", errorBuf3.String())
-					
-					// Last resort - try opening browser
-					log.Printf("All direct print methods failed. Attempting fallback...")
+				// Fallback to opening in browser as last resort
+				log.Printf("Falling back to browser method...")
+				browserCmd := exec.Command("cmd", "/c", "start", absolutePath)
+				if err := browserCmd.Run(); err != nil {
+					log.Printf("ERROR: All print methods failed. Last error: %v", err)
+					os.Remove(tmpFilePath)
 					return fmt.Errorf("all print methods failed: %w", err)
 				}
-			}
-		}
-		
-		// Clean up
-		os.Remove(tmpFilePath)
-		
-	} else if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
-		// For Unix-like systems, try to find the printer device
-		var printerDevice string
-		
-		if runtime.GOOS == "darwin" {
-			// On macOS, USB printers are often mapped to /dev/usb*
-			files, _ := filepath.Glob("/dev/usb*")
-			if len(files) > 0 {
-				printerDevice = files[0]
+			} else {
+				log.Printf("Method 2: PrintUI command executed successfully")
 			}
 		} else {
-			// On Linux, USB printers are often mapped to /dev/usb/lp*
-			files, _ := filepath.Glob("/dev/usb/lp*")
-			if len(files) == 0 {
-				// Try alternative paths
-				files, _ = filepath.Glob("/dev/lp*")
-			}
-			if len(files) > 0 {
-				printerDevice = files[0]
-			}
+			log.Printf("Method 1: .NET printing succeeded")
 		}
 		
-		if printerDevice != "" {
-			log.Printf("Found printer device: %s", printerDevice)
-			
-			// Open the printer device
-			f, err := os.OpenFile(printerDevice, os.O_WRONLY, 0)
-			if err != nil {
-				log.Printf("ERROR: Failed to open printer device: %v", err)
-				return fmt.Errorf("error opening printer device: %w", err)
-			}
-			defer f.Close()
-			
-			// Write ESC/POS commands directly to the printer
-			_, err = f.Write(escposCommands)
-			if err != nil {
-				log.Printf("ERROR: Failed to write to printer device: %v", err)
-				return fmt.Errorf("error writing to printer device: %w", err)
-			}
-			
-			log.Printf("Successfully wrote commands to printer device")
-		} else {
-			// Fallback to using 'lp' command with raw mode
-			log.Printf("No printer device found, using lp command")
-			
-			// Create temp file
-			tmpFile, err := ioutil.TempFile("", "receipt-*.bin")
-			if err != nil {
-				log.Printf("ERROR: Failed to create temp file: %v", err)
-				return fmt.Errorf("error creating temp file: %w", err)
-			}
-			tmpFilePath := tmpFile.Name()
-			
-			// Write the ESC/POS commands
-			if _, err := tmpFile.Write(escposCommands); err != nil {
-				log.Printf("ERROR: Failed to write to temp file: %v", err)
-				tmpFile.Close()
-				os.Remove(tmpFilePath)
-				return fmt.Errorf("error writing to temp file: %w", err)
-			}
-			
-			if err := tmpFile.Close(); err != nil {
-				log.Printf("ERROR: Failed to close temp file: %v", err)
-				os.Remove(tmpFilePath)
-				return fmt.Errorf("error closing temp file: %w", err)
-			}
-			
-			// Send to printer using lp in raw mode
-			lpCmd := exec.Command("lp", "-o", "raw", tmpFilePath)
-			var outputBuf, errorBuf bytes.Buffer
-			lpCmd.Stdout = &outputBuf
-			lpCmd.Stderr = &errorBuf
-			
-			if err := lpCmd.Run(); err != nil {
-				log.Printf("ERROR: Print command failed: %v", err)
-				log.Printf("STDERR: %s", errorBuf.String())
-				os.Remove(tmpFilePath)
-				return fmt.Errorf("error printing receipt: %w, stderr: %s", err, errorBuf.String())
-			}
-			
-			// Clean up
+		// Wait for printing to complete before cleaning up
+		log.Printf("Waiting for print job to complete...")
+		time.Sleep(5 * time.Second)
+		
+	} else {
+		// For non-Windows systems, use the default temp file approach
+		tmpFile, err := ioutil.TempFile("", "receipt-*.html")
+		if err != nil {
+			log.Printf("ERROR: Failed to create temp file: %v", err)
+			return fmt.Errorf("error creating temp file: %w", err)
+		}
+		tmpFilePath = tmpFile.Name()
+		log.Printf("Created temporary file: %s", tmpFilePath)
+		
+		// Write the HTML content to the temp file
+		log.Printf("Writing HTML content to file")
+		if _, err := tmpFile.Write([]byte(html)); err != nil {
+			log.Printf("ERROR: Failed to write to temp file: %v", err)
+			tmpFile.Close()
 			os.Remove(tmpFilePath)
+			return fmt.Errorf("error writing to temp file: %w", err)
 		}
+		if err := tmpFile.Close(); err != nil {
+			log.Printf("ERROR: Failed to close temp file: %v", err)
+			os.Remove(tmpFilePath)
+			return fmt.Errorf("error closing temp file: %w", err)
+		}
+		
+		// Print the file using the operating system's default printer
+		var cmd *exec.Cmd
+		if runtime.GOOS == "darwin" {
+			// On macOS, use lp command
+			log.Printf("Using lp command to print on macOS")
+			cmd = exec.Command("lp", tmpFilePath)
+		} else {
+			// On Linux, use lp command
+			log.Printf("Using lp command to print on Linux")
+			cmd = exec.Command("lp", tmpFilePath)
+		}
+		
+		// Execute the print command
+		var outputBuf, errorBuf bytes.Buffer
+		cmd.Stdout = &outputBuf
+		cmd.Stderr = &errorBuf
+		
+		log.Printf("Executing print command")
+		if err := cmd.Run(); err != nil {
+			log.Printf("ERROR: Print command failed: %v", err)
+			log.Printf("STDERR: %s", errorBuf.String())
+			return fmt.Errorf("error printing receipt: %w, stderr: %s", err, errorBuf.String())
+		}
+		
+		log.Printf("Print command executed successfully")
+		
+		// Add a small delay to ensure the print job is sent before we delete the file
+		log.Printf("Waiting for print job to complete")
+		time.Sleep(2 * time.Second)
+	}
+	
+	// Clean up temporary file
+	log.Printf("Cleaning up temporary file: %s", tmpFilePath)
+	if err := os.Remove(tmpFilePath); err != nil {
+		log.Printf("WARNING: Failed to remove temporary file: %v", err)
+	} else {
+		log.Printf("Successfully removed temporary file")
 	}
 	
 	log.Printf("=== PRINT RECEIPT FUNCTION COMPLETED SUCCESSFULLY ===")
 	return nil
 }
 
-// Update handlePrintReceipt to call this directly
+// handlePrintReceipt processes print requests
 func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
-	// Existing code to parse receipt
+	log.Printf("Received print receipt request from %s", r.RemoteAddr)
+	
+	// Only accept POST requests
+	if r.Method != http.MethodPost {
+		log.Printf("ERROR: Received non-POST request method: %s", r.Method)
+		writeJSONError(w, http.StatusMethodNotAllowed, errors.New("only POST method is allowed"))
+		return
+	}
+
+	// Decode the request body
 	var receipt ReceiptData
 	if err := json.NewDecoder(r.Body).Decode(&receipt); err != nil {
+		log.Printf("ERROR: Failed to decode request body: %v", err)
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
 		return
 	}
 	
+	log.Printf("Processing receipt - Transaction ID: %s, Location: %v, Items: %d", 
+		receipt.TransactionID, receipt.Location, len(receipt.Items))
+
+	// Generate HTML for the receipt
+	html := generateReceiptHTML(receipt)
+	log.Printf("Generated HTML receipt content (%d bytes)", len(html))
+
 	// Print the receipt
-	if err := printReceipt(receipt); err != nil {
+	if err := printReceipt(html); err != nil {
+		log.Printf("ERROR: Failed to print receipt: %v", err)
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
-	
+
+	log.Printf("Receipt printed successfully")
 	// Return success response
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
