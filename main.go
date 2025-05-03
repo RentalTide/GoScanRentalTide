@@ -523,7 +523,7 @@ func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
 }
 
 
-// Create a batch script that forces printing with Microsoft Edge
+// Simplified printReceipt using direct printing commands
 func printReceipt(html string) error {
     log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
     
@@ -534,13 +534,13 @@ func printReceipt(html string) error {
         return fmt.Errorf("error getting current directory: %w", err)
     }
     
-    // Create unique filenames for the batch script and HTML file
+    // Create unique filenames
     timestamp := fmt.Sprintf("%d", time.Now().UnixNano())
-    batchFileName := fmt.Sprintf("print-%s.bat", timestamp)
     htmlFileName := fmt.Sprintf("receipt-%s.html", timestamp)
+    batchFileName := fmt.Sprintf("print-%s.bat", timestamp)
     
-    batchFilePath := filepath.Join(currentDir, batchFileName)
     htmlFilePath := filepath.Join(currentDir, htmlFileName)
+    batchFilePath := filepath.Join(currentDir, batchFileName)
     
     // Write the HTML content to file
     log.Printf("Creating HTML file: %s", htmlFilePath)
@@ -550,23 +550,18 @@ func printReceipt(html string) error {
         return fmt.Errorf("error writing HTML file: %w", err)
     }
     
-    // Create batch file content specifically for Edge with kiosk printing
+    // Create a very simple batch file that uses the Windows print command
     batchContent := fmt.Sprintf(`@echo off
-echo Printing receipt directly with Microsoft Edge...
-:: Try multiple Edge installation paths
-set EDGE_PATH="C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-if not exist %EDGE_PATH% (
-  set EDGE_PATH="C:\Program Files\Microsoft\Edge\Application\msedge.exe"
-)
+echo Printing receipt...
+:: Use direct Windows print command
+print "%s"
 
-:: Print with Edge in kiosk printing mode
-%EDGE_PATH% --kiosk-printing "%s"
-
-echo Waiting for print to complete...
-timeout /t 20 >nul
-echo Cleaning up files...
+echo Print command sent, waiting...
+timeout /t 10 >nul
+echo Cleaning up...
 del "%s"
 del "%s"
+echo Done.
 `, htmlFilePath, htmlFilePath, batchFilePath)
     
     // Write the batch file
@@ -578,9 +573,9 @@ del "%s"
         return fmt.Errorf("error writing batch file: %w", err)
     }
     
-    // Execute the batch file
+    // Execute the batch file with higher visibility (not minimized)
     log.Printf("Executing batch file")
-    cmd := exec.Command("cmd", "/c", "start", "/min", batchFilePath)
+    cmd := exec.Command("cmd", "/c", "start", batchFilePath)
     if err := cmd.Run(); err != nil {
         log.Printf("ERROR: Failed to execute batch file: %v", err)
         os.Remove(htmlFilePath)
