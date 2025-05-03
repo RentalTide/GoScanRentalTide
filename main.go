@@ -570,19 +570,7 @@ func printReceipt(html string) error {
 		}
 		log.Printf("Absolute path: %s", absolutePath)
 		
-		// Method 1: Use PowerShell to print with .NET
-		log.Printf("Trying Method 1: .NET Printing via PowerShell...")
-		psCommand := fmt.Sprintf(`Add-Type -AssemblyName PresentationCore; Add-Type -AssemblyName PresentationFramework; Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $printDoc = New-Object System.Drawing.Printing.PrintDocument; $printDoc.DocumentName = '%s'; $printDoc.Print()`, filepath.Base(tmpFilePath))
-		cmd := exec.Command("powershell", "-Command", psCommand)
 		
-		var outputBuf, errorBuf bytes.Buffer
-		cmd.Stdout = &outputBuf
-		cmd.Stderr = &errorBuf
-		
-		if err := cmd.Run(); err != nil {
-			log.Printf("Method 1 ERROR: Failed to print with .NET: %v", err)
-			log.Printf("Method 1 STDERR: %s", errorBuf.String())
-			log.Printf("Method 1 STDOUT: %s", outputBuf.String())
 			
 			// Try Method 2 if Method 1 fails
 			log.Printf("Trying Method 2: PrintUI.dll approach...")
@@ -616,9 +604,7 @@ func printReceipt(html string) error {
 			} else {
 				log.Printf("Method 2: PrintUI command executed successfully")
 			}
-		} else {
-			log.Printf("Method 1: .NET printing succeeded")
-		}
+		
 		
 		// Wait for printing to complete before cleaning up
 		log.Printf("Waiting for print job to complete...")
