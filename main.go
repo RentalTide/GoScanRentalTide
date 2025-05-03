@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -323,234 +324,351 @@ func scannerHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// Updated generateReceiptHTML with Edge-focused print trigger
-func generateReceiptHTML(receipt ReceiptData) string {
-    locationName := ""
-    switch loc := receipt.Location.(type) {
-    case string:
-        locationName = loc
-    case map[string]interface{}:
-        if name, ok := loc["name"].(string); ok {
-            locationName = name
-        }
-    }
-
-    // Build HTML with width optimized for thermal receipt printers
-    html := `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Receipt</title>
-  <style>
-    /* Print-specific styles */
-    @page {
-      size: 80mm auto;  /* Width of thermal receipt paper */
-      margin: 5mm;
-    }
-    
-    @media print {
-      body {
-        width: 70mm !important;
-        margin: 0 auto !important;
-        padding: 5mm !important;
-        background-color: white !important;
-        color: black !important;
-      }
-    }
-    
-    /* Base styles */
-    body {
-      font-family: 'Arial', sans-serif;
-      font-size: 10pt;
-      width: 70mm;
-      margin: 0 auto;
-      padding: 5mm;
-    }
-    
-    .header {
-      text-align: center;
-      margin-bottom: 5mm;
-    }
-    
-    .business-name {
-      font-weight: bold;
-      font-size: 12pt;
-    }
-    
-    .divider {
-      border-bottom: 1px dashed #000;
-      margin: 3mm 0;
-    }
-    
-    .total {
-      font-weight: bold;
-      margin-top: 2mm;
-    }
-    
-    .footer {
-      text-align: center;
-      margin-top: 5mm;
-    }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <div class="business-name">` + locationName + `</div>
-    <div>` + receipt.Date + `</div>`
-
-    if receipt.CustomerName != nil {
-        html += `    <div>Customer: ` + *receipt.CustomerName + `</div>`
-    }
-
-    html += `  </div>
-
-  <div class="divider"></div>
-  
-  <div>
-    <div>Transaction ID: ` + receipt.TransactionID + `</div>
-    <div>Payment: ` + strings.Title(receipt.PaymentType) + `</div>
-  </div>
-  
-  <div class="divider"></div>
-  
-  <div>
-    <div style="font-weight: bold;">ITEMS</div>`
-
-    // Add items in a simpler format
-    for _, item := range receipt.Items {
-        name, _ := item["name"].(string)
-        quantity, _ := item["quantity"].(float64)
-        price, _ := item["price"].(float64)
-
-        html += fmt.Sprintf(`
-    <div style="margin: 2mm 0;">
-      <div style="font-weight: bold;">%s</div>
-      <div style="display: flex; justify-content: space-between;">
-        <span>%.0f x $%.2f</span>
-        <span>$%.2f</span>
-      </div>
-    </div>`, name, quantity, price, quantity*price)
-    }
-
-    html += `
-  </div>
-  
-  <div class="divider"></div>
-  
-  <div>
-    <div style="display: flex; justify-content: space-between;">
-      <span>Subtotal:</span>
-      <span>$` + fmt.Sprintf("%.2f", receipt.Subtotal) + `</span>
-    </div>
-    
-    <div style="display: flex; justify-content: space-between;">
-      <span>Tax:</span>
-      <span>$` + fmt.Sprintf("%.2f", receipt.Tax) + `</span>
-    </div>
-    
-    <div style="display: flex; justify-content: space-between; margin-top: 2mm; font-weight: bold;">
-      <span>TOTAL:</span>
-      <span>$` + fmt.Sprintf("%.2f", receipt.Total) + `</span>
-    </div>
-  </div>
-  
-  <div class="divider"></div>
-  
-  <div class="footer">
-    <div style="font-weight: bold;">Thank you for your purchase!</div>
-    <div>Visit us again at ` + locationName + `</div>
-  </div>
-
-  <!-- Script to print immediately when opened -->
-  <script>
-    // Try to print immediately when loaded
-    window.onload = function() {
-      try {
-        setTimeout(function() {
-          window.print();
-        }, 500);
-      } catch(e) {
-        console.error("Print failed:", e);
-      }
-    };
-  </script>
-</body>
-</html>`
-
-    return html
+// New function to generate ESC/POS commands for receipt
+func generateESCPOSReceipt(receipt ReceiptData) []byte {
+	var buf bytes.Buffer
+	
+	// ESC/POS initialization
+	buf.Write([]byte{0x1B, 0x40}) // Initialize printer
+	buf.Write([]byte{0x1B, 0x21, 0x01}) // Set font to small
+	
+	// Get location name
+	locationName := ""
+	switch loc := receipt.Location.(type) {
+	case string:
+		locationName = loc
+	case map[string]interface{}:
+		if name, ok := loc["name"].(string); ok {
+			locationName = name
+		}
+	}
+	
+	// Write header - center aligned
+	buf.Write([]byte{0x1B, 0x61, 0x01}) // Center alignment
+	buf.Write([]byte(locationName + "\n"))
+	buf.Write([]byte(receipt.Date + "\n"))
+	if receipt.CustomerName != nil {
+		buf.Write([]byte("Customer: " + *receipt.CustomerName + "\n"))
+	}
+	
+	// Write divider
+	buf.Write([]byte{0x1B, 0x61, 0x00}) // Left alignment
+	buf.Write([]byte("--------------------------------\n"))
+	
+	// Transaction info
+	buf.Write([]byte("Transaction ID: " + receipt.TransactionID + "\n"))
+	buf.Write([]byte("Payment: " + strings.Title(receipt.PaymentType) + "\n"))
+	
+	// Divider
+	buf.Write([]byte("--------------------------------\n"))
+	
+	// Items header
+	buf.Write([]byte{0x1B, 0x21, 0x08}) // Bold
+	buf.Write([]byte("ITEMS\n"))
+	buf.Write([]byte{0x1B, 0x21, 0x01}) // Regular text
+	
+	// Items
+	for _, item := range receipt.Items {
+		name, _ := item["name"].(string)
+		quantity, _ := item["quantity"].(float64)
+		price, _ := item["price"].(float64)
+		total := quantity * price
+		sku, _ := item["sku"].(string)
+		
+		buf.Write([]byte{0x1B, 0x21, 0x08}) // Bold
+		buf.Write([]byte(name + "\n"))
+		buf.Write([]byte{0x1B, 0x21, 0x01}) // Regular
+		
+		// Quantity and price
+		qtyLine := fmt.Sprintf("  %.0f x $%.2f", quantity, price)
+		// Pad spaces to align total to the right
+		spaces := 32 - len(qtyLine) - len(fmt.Sprintf("$%.2f", total))
+		for i := 0; i < spaces; i++ {
+			qtyLine += " "
+		}
+		qtyLine += fmt.Sprintf("$%.2f\n", total)
+		buf.Write([]byte(qtyLine))
+		
+		if sku != "" {
+			buf.Write([]byte("  SKU: " + sku + "\n"))
+		}
+	}
+	
+	// Divider
+	buf.Write([]byte("--------------------------------\n"))
+	
+	// Totals
+	writeTotal := func(label string, value float64, bold bool) {
+		line := label
+		spaces := 32 - len(label) - len(fmt.Sprintf("$%.2f", value))
+		for i := 0; i < spaces; i++ {
+			line += " "
+		}
+		line += fmt.Sprintf("$%.2f\n", value)
+		
+		if bold {
+			buf.Write([]byte{0x1B, 0x21, 0x08}) // Bold
+		}
+		buf.Write([]byte(line))
+		if bold {
+			buf.Write([]byte{0x1B, 0x21, 0x01}) // Regular
+		}
+	}
+	
+	writeTotal("Subtotal:", receipt.Subtotal, false)
+	
+	// Add discount if applicable
+	if receipt.DiscountAmount != nil && receipt.DiscountPercentage != nil {
+		discountLabel := fmt.Sprintf("Discount (%.0f%%):", *receipt.DiscountPercentage)
+		writeTotal(discountLabel, -*receipt.DiscountAmount, false)
+	}
+	
+	// Add tax
+	writeTotal("Tax:", receipt.Tax, false)
+	buf.Write([]byte(fmt.Sprintf("  GST (5%%): $%.2f\n", receipt.Subtotal*0.05)))
+	buf.Write([]byte(fmt.Sprintf("  PST (7%%): $%.2f\n", receipt.Subtotal*0.07)))
+	
+	// Add refund if applicable
+	if receipt.RefundAmount != nil && *receipt.RefundAmount > 0 {
+		writeTotal("Refund:", -*receipt.RefundAmount, false)
+	}
+	
+	// Add tip if applicable
+	if receipt.Tip != nil && *receipt.Tip > 0 {
+		writeTotal("Tip:", *receipt.Tip, false)
+	}
+	
+	// Total
+	buf.Write([]byte{0x1B, 0x45, 0x01}) // Emphasize on
+	writeTotal("TOTAL:", receipt.Total, true)
+	buf.Write([]byte{0x1B, 0x45, 0x00}) // Emphasize off
+	
+	// Cash payment details
+	if receipt.PaymentType == "cash" && receipt.CashGiven != nil && receipt.ChangeDue != nil {
+		buf.Write([]byte("\n"))
+		writeTotal("Cash:", *receipt.CashGiven, false)
+		writeTotal("Change:", *receipt.ChangeDue, false)
+	}
+	
+	// Divider
+	buf.Write([]byte("--------------------------------\n"))
+	
+	// Footer
+	buf.Write([]byte{0x1B, 0x61, 0x01}) // Center alignment
+	buf.Write([]byte{0x1B, 0x21, 0x08}) // Bold
+	buf.Write([]byte("Thank you for your purchase!\n"))
+	buf.Write([]byte{0x1B, 0x21, 0x01}) // Regular
+	buf.Write([]byte("Visit us again at " + locationName + "\n\n\n\n"))
+	
+	// Cut paper
+	buf.Write([]byte{0x1D, 0x56, 0x42, 0x00}) // Full cut
+	
+	return buf.Bytes()
 }
 
-
-// Simplified printReceipt that only creates the file
-func printReceipt(html string) (string, error) {
-    log.Printf("=== CREATING RECEIPT FILE ===")
-    
-    // Get current directory
-    currentDir, err := os.Getwd()
-    if err != nil {
-        log.Printf("ERROR: Failed to get current directory: %v", err)
-        return "", fmt.Errorf("error getting current directory: %w", err)
-    }
-    
-    // Create a unique filename with PRINT_ME prefix
-    timestamp := fmt.Sprintf("%d", time.Now().UnixNano())
-    htmlFileName := fmt.Sprintf("PRINT_ME_receipt_%s.html", timestamp)
-    htmlFilePath := filepath.Join(currentDir, htmlFileName)
-    
-    // Write the HTML content to file
-    log.Printf("Creating HTML file: %s", htmlFilePath)
-    err = ioutil.WriteFile(htmlFilePath, []byte(html), 0644)
-    if err != nil {
-        log.Printf("ERROR: Failed to write HTML file: %v", err)
-        return "", fmt.Errorf("error writing HTML file: %w", err)
-    }
-    
-    log.Printf("Receipt file created successfully: %s", htmlFilePath)
-    
-    return htmlFilePath, nil
+// Modified printReceipt function to send ESC/POS directly to printer
+func printReceipt(receipt ReceiptData) error {
+	log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
+	
+	// Generate ESC/POS commands
+	escposCommands := generateESCPOSReceipt(receipt)
+	log.Printf("Generated ESC/POS commands (%d bytes)", len(escposCommands))
+	
+	if runtime.GOOS == "windows" {
+		// On Windows, we'll need to write to a file and use Windows' print spooler
+		// Create temp file
+		tmpFile, err := ioutil.TempFile(os.TempDir(), "receipt-*.bin")
+		if err != nil {
+			log.Printf("ERROR: Failed to create temp file: %v", err)
+			return fmt.Errorf("error creating temp file: %w", err)
+		}
+		tmpFilePath := tmpFile.Name()
+		log.Printf("Created temporary file at system temp location: %s", tmpFilePath)
+		
+		// Write the ESC/POS commands to the temp file
+		if _, err := tmpFile.Write(escposCommands); err != nil {
+			log.Printf("ERROR: Failed to write to temp file: %v", err)
+			tmpFile.Close()
+			os.Remove(tmpFilePath)
+			return fmt.Errorf("error writing to temp file: %w", err)
+		}
+		
+		if err := tmpFile.Close(); err != nil {
+			log.Printf("ERROR: Failed to close temp file: %v", err)
+			os.Remove(tmpFilePath)
+			return fmt.Errorf("error closing temp file: %w", err)
+		}
+		
+		// Get printer name - can be adjusted based on your receipt printer name
+		printerCmd := exec.Command("powershell", "-Command", "Get-WmiObject -Query \"SELECT * FROM Win32_Printer WHERE Default=$true\" | Select-Object -ExpandProperty Name")
+		var printerBuf bytes.Buffer
+		printerCmd.Stdout = &printerBuf
+		
+		if err := printerCmd.Run(); err != nil {
+			log.Printf("WARNING: Could not get default printer name: %v", err)
+			// Continue with empty printer name, Windows will use default
+		}
+		
+		printerName := strings.TrimSpace(printerBuf.String())
+		log.Printf("Using printer: %s", printerName)
+		
+		// Try different methods to print to the receipt printer
+		
+		// Method 1: Try direct printing with the printer name
+		log.Printf("Trying Method 1: Direct print to printer")
+		printCommand := exec.Command("cmd", "/c", fmt.Sprintf("type \"%s\" > \"%s\"", tmpFilePath, printerName))
+		var outputBuf1, errorBuf1 bytes.Buffer
+		printCommand.Stdout = &outputBuf1
+		printCommand.Stderr = &errorBuf1
+		
+		if err := printCommand.Run(); err != nil {
+			log.Printf("Method 1 ERROR: Failed to print directly: %v", err)
+			log.Printf("Method 1 STDERR: %s", errorBuf1.String())
+			
+			// Method 2: Try using the copy command to LPT1
+			log.Printf("Trying Method 2: Copy to LPT1 port...")
+			copyCmd := exec.Command("cmd", "/c", fmt.Sprintf("copy /b \"%s\" LPT1", tmpFilePath))
+			var outputBuf2, errorBuf2 bytes.Buffer
+			copyCmd.Stdout = &outputBuf2
+			copyCmd.Stderr = &errorBuf2
+			
+			if err := copyCmd.Run(); err != nil {
+				log.Printf("Method 2 ERROR: Copy to LPT1 failed: %v", err)
+				log.Printf("Method 2 STDERR: %s", errorBuf2.String())
+				
+				// Method 3: Try using printui.dll approach
+				log.Printf("Trying Method 3: PrintUI.dll approach...")
+				printUICmd := exec.Command("cmd", "/c", 
+					fmt.Sprintf("rundll32 printui.dll,PrintUIEntry /k /n\"%s\" /f\"%s\" /j\"Raw Print\"", 
+					printerName, tmpFilePath))
+				var outputBuf3, errorBuf3 bytes.Buffer
+				printUICmd.Stdout = &outputBuf3
+				printUICmd.Stderr = &errorBuf3
+				
+				if err := printUICmd.Run(); err != nil {
+					log.Printf("Method 3 ERROR: PrintUI approach failed: %v", err)
+					log.Printf("Method 3 STDERR: %s", errorBuf3.String())
+					
+					// Last resort - try opening browser
+					log.Printf("All direct print methods failed. Attempting fallback...")
+					return fmt.Errorf("all print methods failed: %w", err)
+				}
+			}
+		}
+		
+		// Clean up
+		os.Remove(tmpFilePath)
+		
+	} else if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		// For Unix-like systems, try to find the printer device
+		var printerDevice string
+		
+		if runtime.GOOS == "darwin" {
+			// On macOS, USB printers are often mapped to /dev/usb*
+			files, _ := filepath.Glob("/dev/usb*")
+			if len(files) > 0 {
+				printerDevice = files[0]
+			}
+		} else {
+			// On Linux, USB printers are often mapped to /dev/usb/lp*
+			files, _ := filepath.Glob("/dev/usb/lp*")
+			if len(files) == 0 {
+				// Try alternative paths
+				files, _ = filepath.Glob("/dev/lp*")
+			}
+			if len(files) > 0 {
+				printerDevice = files[0]
+			}
+		}
+		
+		if printerDevice != "" {
+			log.Printf("Found printer device: %s", printerDevice)
+			
+			// Open the printer device
+			f, err := os.OpenFile(printerDevice, os.O_WRONLY, 0)
+			if err != nil {
+				log.Printf("ERROR: Failed to open printer device: %v", err)
+				return fmt.Errorf("error opening printer device: %w", err)
+			}
+			defer f.Close()
+			
+			// Write ESC/POS commands directly to the printer
+			_, err = f.Write(escposCommands)
+			if err != nil {
+				log.Printf("ERROR: Failed to write to printer device: %v", err)
+				return fmt.Errorf("error writing to printer device: %w", err)
+			}
+			
+			log.Printf("Successfully wrote commands to printer device")
+		} else {
+			// Fallback to using 'lp' command with raw mode
+			log.Printf("No printer device found, using lp command")
+			
+			// Create temp file
+			tmpFile, err := ioutil.TempFile("", "receipt-*.bin")
+			if err != nil {
+				log.Printf("ERROR: Failed to create temp file: %v", err)
+				return fmt.Errorf("error creating temp file: %w", err)
+			}
+			tmpFilePath := tmpFile.Name()
+			
+			// Write the ESC/POS commands
+			if _, err := tmpFile.Write(escposCommands); err != nil {
+				log.Printf("ERROR: Failed to write to temp file: %v", err)
+				tmpFile.Close()
+				os.Remove(tmpFilePath)
+				return fmt.Errorf("error writing to temp file: %w", err)
+			}
+			
+			if err := tmpFile.Close(); err != nil {
+				log.Printf("ERROR: Failed to close temp file: %v", err)
+				os.Remove(tmpFilePath)
+				return fmt.Errorf("error closing temp file: %w", err)
+			}
+			
+			// Send to printer using lp in raw mode
+			lpCmd := exec.Command("lp", "-o", "raw", tmpFilePath)
+			var outputBuf, errorBuf bytes.Buffer
+			lpCmd.Stdout = &outputBuf
+			lpCmd.Stderr = &errorBuf
+			
+			if err := lpCmd.Run(); err != nil {
+				log.Printf("ERROR: Print command failed: %v", err)
+				log.Printf("STDERR: %s", errorBuf.String())
+				os.Remove(tmpFilePath)
+				return fmt.Errorf("error printing receipt: %w, stderr: %s", err, errorBuf.String())
+			}
+			
+			// Clean up
+			os.Remove(tmpFilePath)
+		}
+	}
+	
+	log.Printf("=== PRINT RECEIPT FUNCTION COMPLETED SUCCESSFULLY ===")
+	return nil
 }
 
-// Updated handler that just returns the file path
+// Update handlePrintReceipt to call this directly
 func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
-    log.Printf("Received print receipt request from %s", r.RemoteAddr)
-    
-    // Only accept POST requests
-    if r.Method != http.MethodPost {
-        log.Printf("ERROR: Received non-POST request method: %s", r.Method)
-        writeJSONError(w, http.StatusMethodNotAllowed, errors.New("only POST method is allowed"))
-        return
-    }
-
-    // Decode the request body
-    var receipt ReceiptData
-    if err := json.NewDecoder(r.Body).Decode(&receipt); err != nil {
-        log.Printf("ERROR: Failed to decode request body: %v", err)
-        writeJSONError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
-        return
-    }
-    
-    log.Printf("Processing receipt - Transaction ID: %s, Items: %d", 
-        receipt.TransactionID, len(receipt.Items))
-
-    // Generate HTML for the receipt
-    html := generateReceiptHTML(receipt)
-    
-    // Create the file and get the path
-    filePath, err := printReceipt(html)
-    if err != nil {
-        log.Printf("ERROR: Failed to create receipt file: %v", err)
-        writeJSONError(w, http.StatusInternalServerError, err)
-        return
-    }
-    
-    // Return success with the file path
-    log.Printf("Returning file path to client: %s", filePath)
-    w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(map[string]interface{}{
-        "status":  "success",
-        "message": "Receipt file created successfully. Please open and print manually.",
-        "filePath": filePath,
-    })
+	// Existing code to parse receipt
+	var receipt ReceiptData
+	if err := json.NewDecoder(r.Body).Decode(&receipt); err != nil {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
+		return
+	}
+	
+	// Print the receipt
+	if err := printReceipt(receipt); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
+	
+	// Return success response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "success",
+		"message": "Receipt printed successfully",
+	})
 }
 
 func main() {
