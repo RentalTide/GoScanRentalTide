@@ -324,279 +324,181 @@ func scannerHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// generateReceiptHTML creates HTML content for the receipt
-func generateReceiptHTML(receipt ReceiptData) string {
-	locationName := ""
-	switch loc := receipt.Location.(type) {
-	case string:
-		locationName = loc
-	case map[string]interface{}:
-		if name, ok := loc["name"].(string); ok {
-			locationName = name
-		}
-	}
-
-	// Start building the HTML content
-	html := `<!DOCTYPE html>
+// Generate very simple receipt HTML
+func generateBasicReceiptHTML(receipt ReceiptData) string {
+    // Extract location name
+    locationName := ""
+    switch loc := receipt.Location.(type) {
+    case string:
+        locationName = loc
+    case map[string]interface{}:
+        if name, ok := loc["name"].(string); ok {
+            locationName = name
+        }
+    }
+    
+    // Build a very simple HTML
+    html := `<!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8">
   <title>Receipt</title>
   <style>
-    @page {
-      margin: 0.5cm;
-      size: 80mm auto;  /* Receipt paper size */
-    }
     body {
-      font-family: 'Arial', sans-serif;
-      margin: 0;
-      padding: 10px;
-      font-size: 10pt;
-      width: 80mm;  /* Receipt width */
-    }
-    .header {
-      text-align: center;
-      margin-bottom: 10px;
-    }
-    .business-name {
-      font-weight: bold;
+      font-family: Arial, sans-serif;
       font-size: 12pt;
+      width: 3in;
+      margin: 0;
+      padding: 0.2in;
     }
-    .divider {
-      border-bottom: 1px dashed #ccc;
-      margin: 10px 0;
-    }
-    .item {
-      margin-bottom: 5px;
-    }
-    .item-name {
-      font-weight: bold;
-    }
-    .item-details {
-      display: flex;
-      justify-content: space-between;
-      margin-left: 10px;
-    }
-    .total-section {
-      margin-top: 10px;
-      font-weight: bold;
-    }
-    .footer {
+    h1 {
+      font-size: 14pt;
       text-align: center;
-      margin-top: 15px;
-      font-size: 9pt;
+    }
+    hr {
+      border: none;
+      border-top: 1px dashed black;
+    }
+    .center {
+      text-align: center;
+    }
+    .bold {
+      font-weight: bold;
+    }
+    table {
+      width: 100%;
+    }
+    table.items td {
+      padding: 2px 0;
     }
   </style>
-  <script>
-    // Add an auto-print script that executes as soon as the page loads
-    window.onload = function() {
-      window.print();
-    }
-  </script>
 </head>
 <body>
-  <div class="header">
-    <div class="business-name">` + locationName + `</div>
-    <div class="date">` + receipt.Date + `</div>`
-
-	if receipt.CustomerName != nil {
-		html += `    <div class="customer">Customer: ` + *receipt.CustomerName + `</div>`
-	}
-
-	html += `  </div>
-
-  <div class="divider"></div>
-  
-  <div class="transaction-info">
-    <div>Transaction ID: ` + receipt.TransactionID + `</div>
-    <div>Payment: ` + strings.Title(receipt.PaymentType) + `</div>
-  </div>
-  
-  <div class="divider"></div>
-  
-  <div class="items-section">
-    <div style="font-weight: bold; margin-bottom: 5px;">ITEMS</div>`
-
-	// Add items
-	for _, item := range receipt.Items {
-		name, _ := item["name"].(string)
-		quantity, _ := item["quantity"].(float64)
-		price, _ := item["price"].(float64)
-		sku, _ := item["sku"].(string)
-
-		html += fmt.Sprintf(`
-    <div class="item">
-      <div class="item-name">%s</div>
-      <div class="item-details">
-        <div>%.0f x $%.2f</div>
-        <div>$%.2f</div>
-      </div>`, name, quantity, price, quantity*price)
-
-		if sku != "" {
-			html += fmt.Sprintf(`
-      <div style="margin-left: 10px; font-size: 8pt;">SKU: %s</div>`, sku)
-		}
-
-		html += `
-    </div>`
-	}
-
-	html += `
-  </div>
-  
-  <div class="divider"></div>
-  
-  <div class="totals-section">
-    <div style="display: flex; justify-content: space-between;">
-      <div>Subtotal:</div>
-      <div>$` + fmt.Sprintf("%.2f", receipt.Subtotal) + `</div>
-    </div>`
-
-	// Add discount if applicable
-	if receipt.DiscountAmount != nil && receipt.DiscountPercentage != nil {
-		html += fmt.Sprintf(`
-    <div style="display: flex; justify-content: space-between;">
-      <div>Discount (%.0f%%):</div>
-      <div>-$%.2f</div>
-    </div>`, *receipt.DiscountPercentage, *receipt.DiscountAmount)
-	}
-
-	// Add tax
-	html += `
-    <div style="display: flex; justify-content: space-between;">
-      <div>Tax:</div>
-      <div>$` + fmt.Sprintf("%.2f", receipt.Tax) + `</div>
-    </div>
-    <div style="margin-left: 10px; font-size: 8pt;">
-      <div>GST (5%): $` + fmt.Sprintf("%.2f", receipt.Subtotal*0.05) + `</div>
-      <div>PST (7%): $` + fmt.Sprintf("%.2f", receipt.Subtotal*0.07) + `</div>
-    </div>`
-
-	// Add refund if applicable
-	if receipt.RefundAmount != nil && *receipt.RefundAmount > 0 {
-		html += fmt.Sprintf(`
-    <div style="display: flex; justify-content: space-between;">
-      <div>Refund:</div>
-      <div>-$%.2f</div>
-    </div>`, *receipt.RefundAmount)
-	}
-
-	// Add tip if applicable
-	if receipt.Tip != nil && *receipt.Tip > 0 {
-		html += fmt.Sprintf(`
-    <div style="display: flex; justify-content: space-between;">
-      <div>Tip:</div>
-      <div>$%.2f</div>
-    </div>`, *receipt.Tip)
-	}
-
-	// Total
-	html += `
-    <div style="display: flex; justify-content: space-between; margin-top: 10px; padding: 5px; background-color: #f5f5f5; font-weight: bold;">
-      <div>TOTAL:</div>
-      <div>$` + fmt.Sprintf("%.2f", receipt.Total) + `</div>
-    </div>`
-
-	// Cash payment details if applicable
-	if receipt.PaymentType == "cash" && receipt.CashGiven != nil && receipt.ChangeDue != nil {
-		html += fmt.Sprintf(`
-    <div style="margin-top: 10px; padding: 5px; background-color: #f8f8f8;">
-      <div style="display: flex; justify-content: space-between;">
-        <div>Cash:</div>
-        <div>$%.2f</div>
-      </div>
-      <div style="display: flex; justify-content: space-between;">
-        <div>Change:</div>
-        <div>$%.2f</div>
-      </div>
-    </div>`, *receipt.CashGiven, *receipt.ChangeDue)
-	}
-
-	// Footer
-	html += `
-  </div>
-  
-  <div class="divider"></div>
-  
-  <div class="footer">
-    <div style="font-weight: bold;">Thank you for your purchase!</div>
-    <div style="margin-top: 5px;">Visit us again at ` + locationName + `</div>
-  </div>
+  <h1>` + locationName + `</h1>
+  <p class="center">` + receipt.Date + `</p>
+  <p>Transaction: ` + receipt.TransactionID + `</p>
+  <hr>
+  <p class="bold">ITEMS:</p>
+  <table class="items">`
+    
+    // Add items
+    for _, item := range receipt.Items {
+        name, _ := item["name"].(string)
+        quantity, _ := item["quantity"].(float64)
+        price, _ := item["price"].(float64)
+        
+        html += fmt.Sprintf(`
+    <tr>
+      <td>%s</td>
+      <td align="right">%.0f x $%.2f</td>
+    </tr>`, name, quantity, price)
+    }
+    
+    html += `
+  </table>
+  <hr>
+  <table>
+    <tr>
+      <td>Subtotal:</td>
+      <td align="right">$` + fmt.Sprintf("%.2f", receipt.Subtotal) + `</td>
+    </tr>
+    <tr>
+      <td>Tax:</td>
+      <td align="right">$` + fmt.Sprintf("%.2f", receipt.Tax) + `</td>
+    </tr>
+    <tr class="bold">
+      <td>TOTAL:</td>
+      <td align="right">$` + fmt.Sprintf("%.2f", receipt.Total) + `</td>
+    </tr>
+  </table>
+  <hr>
+  <p class="center bold">Thank you for your purchase!</p>
 </body>
 </html>`
 
-	return html
+    return html
 }
 
-// Modified printReceipt function that only uses the browser method
-func printReceipt(html string) error {
-    log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
+// Print receipt directly to printer without browser
+func printReceiptDirect(html string) error {
+    log.Printf("=== DIRECT PRINT RECEIPT FUNCTION STARTED ===")
     
-    // Path for the temporary file
-    tmpFile, err := ioutil.TempFile(os.TempDir(), "receipt-*.html")
+    // Create temp file in current working directory
+    currentDir, err := os.Getwd()
     if err != nil {
-        log.Printf("ERROR: Failed to create temp file: %v", err)
-        return fmt.Errorf("error creating temp file: %w", err)
+        log.Printf("ERROR: Failed to get current directory: %v", err)
+        return fmt.Errorf("error getting current directory: %w", err)
     }
-    tmpFilePath := tmpFile.Name()
-    log.Printf("Created temporary file at: %s", tmpFilePath)
+    
+    // Use current time for unique filename in current directory
+    tmpFilePath := filepath.Join(currentDir, fmt.Sprintf("receipt-%d.html", time.Now().UnixNano()))
+    log.Printf("Creating receipt file at: %s", tmpFilePath)
     
     // Write the HTML content to the file
-    log.Printf("Writing HTML content to file (%d bytes)", len(html))
-    if _, err := tmpFile.Write([]byte(html)); err != nil {
-        log.Printf("ERROR: Failed to write to temp file: %v", err)
-        tmpFile.Close()
-        os.Remove(tmpFilePath)
-        return fmt.Errorf("error writing to temp file: %w", err)
-    }
-    
-    if err := tmpFile.Close(); err != nil {
-        log.Printf("ERROR: Failed to close temp file: %v", err)
-        os.Remove(tmpFilePath)
-        return fmt.Errorf("error closing temp file: %w", err)
-    }
-    
-    // Get absolute path
-    absolutePath, err := filepath.Abs(tmpFilePath)
+    err = ioutil.WriteFile(tmpFilePath, []byte(html), 0644)
     if err != nil {
-        log.Printf("ERROR: Failed to get absolute path: %v", err)
-        os.Remove(tmpFilePath)
-        return fmt.Errorf("error getting absolute path: %w", err)
-    }
-    log.Printf("Absolute path: %s", absolutePath)
-    
-    // ONLY use browser method - skip PowerShell completely
-    log.Printf("Opening file in default browser...")
-    browserCmd := exec.Command("cmd", "/c", "start", absolutePath)
-    if err := browserCmd.Run(); err != nil {
-        log.Printf("ERROR: Failed to open in browser: %v", err)
-        os.Remove(tmpFilePath)
-        return fmt.Errorf("error opening file in browser: %w", err)
+        log.Printf("ERROR: Failed to write file: %v", err)
+        return fmt.Errorf("error writing file: %w", err)
     }
     
-    log.Printf("File opened in browser successfully")
+    log.Printf("HTML file created successfully")
+    
+    // Create a simple batch file to handle printing
+    batchFilePath := filepath.Join(currentDir, fmt.Sprintf("print-%d.bat", time.Now().UnixNano()))
+    batchContent := fmt.Sprintf(`
+@echo off
+echo Printing receipt...
+start /wait "" "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --kiosk-printing "%s"
+echo Print job submitted.
+`, tmpFilePath)
+
+    err = ioutil.WriteFile(batchFilePath, []byte(batchContent), 0755)
+    if err != nil {
+        log.Printf("ERROR: Failed to create batch file: %v", err)
+        os.Remove(tmpFilePath)
+        return fmt.Errorf("error creating batch file: %w", err)
+    }
+    
+    log.Printf("Batch file created at: %s", batchFilePath)
+    
+    // Run the batch file
+    log.Printf("Executing batch file...")
+    cmd := exec.Command("cmd", "/c", batchFilePath)
+    var stdoutBuf, stderrBuf bytes.Buffer
+    cmd.Stdout = &stdoutBuf
+    cmd.Stderr = &stderrBuf
+    
+    err = cmd.Run()
+    stdout := stdoutBuf.String()
+    stderr := stderrBuf.String()
+    
+    log.Printf("Batch file execution completed")
+    log.Printf("STDOUT: %s", stdout)
+    log.Printf("STDERR: %s", stderr)
+    
+    if err != nil {
+        log.Printf("ERROR: Batch execution failed: %v", err)
+    } else {
+        log.Printf("Batch execution succeeded")
+    }
     
     // Return success immediately, but start cleanup in background
     go func() {
         // Wait longer before cleanup
         log.Printf("Waiting for print job to complete...")
-        time.Sleep(30 * time.Second)
+        time.Sleep(10 * time.Second)
         
-        // Clean up temporary file
-        log.Printf("Cleaning up temporary file: %s", tmpFilePath)
-        if err := os.Remove(tmpFilePath); err != nil {
-            log.Printf("WARNING: Failed to remove temporary file: %v", err)
-        } else {
-            log.Printf("Successfully removed temporary file")
-        }
+        // Clean up temporary files
+        log.Printf("Cleaning up temporary files")
+        os.Remove(tmpFilePath)
+        os.Remove(batchFilePath)
         
-        log.Printf("=== PRINT RECEIPT FUNCTION CLEANUP COMPLETED ===")
+        log.Printf("=== DIRECT PRINT RECEIPT FUNCTION CLEANUP COMPLETED ===")
     }()
     
     return nil
 }
 
-// Updated handler with immediate response
+// Updated handler with direct printing
 func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
     log.Printf("Received print receipt request from %s", r.RemoteAddr)
     
@@ -615,23 +517,33 @@ func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
         return
     }
     
-    // Generate HTML for the receipt
-    html := generateReceiptHTML(receipt)
-    
-    // Launch printing process (which now returns quickly)
-    if err := printReceipt(html); err != nil {
-        log.Printf("ERROR: Failed to print receipt: %v", err)
-        writeJSONError(w, http.StatusInternalServerError, err)
-        return
-    }
+    log.Printf("Processing receipt - Transaction ID: %s, Items: %d", 
+        receipt.TransactionID, len(receipt.Items))
 
-    // Return success response immediately
+    // Generate basic HTML receipt
+    html := generateBasicReceiptHTML(receipt)
+    log.Printf("Generated basic HTML receipt (%d bytes)", len(html))
+
+    // Return success response BEFORE printing
+    // This ensures 200 is returned quickly
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(http.StatusOK)
-    json.NewEncoder(w).Encode(map[string]interface{}{
+    err := json.NewEncoder(w).Encode(map[string]interface{}{
         "status":  "success",
-        "message": "Receipt print job submitted successfully",
+        "message": "Receipt print job submitted",
     })
+    if err != nil {
+        log.Printf("ERROR: Failed to write response: %v", err)
+    }
+    
+    // Start printing in background AFTER returning 200
+    go func() {
+        if err := printReceiptDirect(html); err != nil {
+            log.Printf("ERROR: Failed to print receipt: %v", err)
+        } else {
+            log.Printf("Receipt print job completed successfully")
+        }
+    }()
 }
 
 func main() {
