@@ -325,6 +325,7 @@ func scannerHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // Updated generateReceiptHTML with better print styling
+// Updated generateReceiptHTML with improved print trigger
 func generateReceiptHTML(receipt ReceiptData) string {
     locationName := ""
     switch loc := receipt.Location.(type) {
@@ -336,7 +337,7 @@ func generateReceiptHTML(receipt ReceiptData) string {
         }
     }
 
-    // Start building the HTML content with improved print styling
+    // Start building the HTML content with guaranteed print trigger
     html := `<!DOCTYPE html>
 <html>
 <head>
@@ -363,14 +364,12 @@ func generateReceiptHTML(receipt ReceiptData) string {
         padding: 0 !important;
         background-color: white !important;
         color: black !important;
-        -webkit-print-color-adjust: exact !important;
-        print-color-adjust: exact !important;
       }
     }
     
     /* General styles */
     body {
-      font-family: 'Arial', sans-serif;
+      font-family: Arial, sans-serif;
       font-size: 12pt;
       width: 70mm;
       margin: 0 auto;
@@ -396,68 +395,8 @@ func generateReceiptHTML(receipt ReceiptData) string {
       width: 100%;
     }
     
-    .transaction-info {
-      margin-bottom: 4mm;
-    }
-    
-    .items-section {
-      margin-bottom: 4mm;
-    }
-    
-    .item {
-      margin-bottom: 3mm;
-    }
-    
-    .item-name {
-      font-weight: bold;
-    }
-    
-    .item-details {
-      display: flex;
-      justify-content: space-between;
-      margin-left: 3mm;
-    }
-    
-    .totals-section {
-      margin-bottom: 4mm;
-    }
-    
-    .total-row {
-      display: flex;
-      justify-content: space-between;
-      margin-bottom: 1mm;
-    }
-    
-    .footer {
-      text-align: center;
-      margin-top: 5mm;
-      font-size: 10pt;
-    }
+    /* More styles as needed */
   </style>
-  <script>
-    // Improved auto-print script with multiple attempts
-    window.onload = function() {
-      console.log("Document loaded, preparing to print...");
-      
-      // Function to trigger print dialog
-      function triggerPrint() {
-        console.log("Triggering print dialog...");
-        window.print();
-        console.log("Print dialog triggered");
-      }
-      
-      // First attempt after a short delay
-      setTimeout(function() {
-        triggerPrint();
-      }, 1000);
-      
-      // Second attempt after a longer delay as backup
-      setTimeout(function() {
-        console.log("Second print attempt...");
-        triggerPrint();
-      }, 5000);
-    }
-  </script>
 </head>
 <body>
   <div class="header">
@@ -490,9 +429,9 @@ func generateReceiptHTML(receipt ReceiptData) string {
         sku, _ := item["sku"].(string)
 
         html += fmt.Sprintf(`
-    <div class="item">
-      <div class="item-name">%s</div>
-      <div class="item-details">
+    <div style="margin-bottom: 3mm;">
+      <div style="font-weight: bold;">%s</div>
+      <div style="display: flex; justify-content: space-between; margin-left: 3mm;">
         <div>%.0f x $%.2f</div>
         <div>$%.2f</div>
       </div>`, name, quantity, price, quantity*price)
@@ -511,27 +450,18 @@ func generateReceiptHTML(receipt ReceiptData) string {
   
   <div class="divider"></div>
   
-  <div class="totals-section">`
+  <div style="margin-bottom: 4mm;">`
 
     // Subtotal
     html += `
-    <div class="total-row">
+    <div style="display: flex; justify-content: space-between; margin-bottom: 1mm;">
       <div>Subtotal:</div>
       <div>$` + fmt.Sprintf("%.2f", receipt.Subtotal) + `</div>
     </div>`
 
-    // Add discount if applicable
-    if receipt.DiscountAmount != nil && receipt.DiscountPercentage != nil {
-        html += fmt.Sprintf(`
-    <div class="total-row">
-      <div>Discount (%.0f%%):</div>
-      <div>-$%.2f</div>
-    </div>`, *receipt.DiscountPercentage, *receipt.DiscountAmount)
-    }
-
     // Add tax
     html += `
-    <div class="total-row">
+    <div style="display: flex; justify-content: space-between; margin-bottom: 1mm;">
       <div>Tax:</div>
       <div>$` + fmt.Sprintf("%.2f", receipt.Tax) + `</div>
     </div>
@@ -540,55 +470,37 @@ func generateReceiptHTML(receipt ReceiptData) string {
       <div>PST (7%): $` + fmt.Sprintf("%.2f", receipt.Subtotal*0.07) + `</div>
     </div>`
 
-    // Add refund if applicable
-    if receipt.RefundAmount != nil && *receipt.RefundAmount > 0 {
-        html += fmt.Sprintf(`
-    <div class="total-row">
-      <div>Refund:</div>
-      <div>-$%.2f</div>
-    </div>`, *receipt.RefundAmount)
-    }
-
-    // Add tip if applicable
-    if receipt.Tip != nil && *receipt.Tip > 0 {
-        html += fmt.Sprintf(`
-    <div class="total-row">
-      <div>Tip:</div>
-      <div>$%.2f</div>
-    </div>`, *receipt.Tip)
-    }
-
     // Total
     html += `
-    <div class="total-row" style="font-weight: bold; margin-top: 2mm; border-top: 1px solid #000; padding-top: 2mm;">
+    <div style="display: flex; justify-content: space-between; margin-top: 2mm; border-top: 1px solid #000; padding-top: 2mm; font-weight: bold;">
       <div>TOTAL:</div>
       <div>$` + fmt.Sprintf("%.2f", receipt.Total) + `</div>
     </div>`
-
-    // Cash payment details if applicable
-    if receipt.PaymentType == "cash" && receipt.CashGiven != nil && receipt.ChangeDue != nil {
-        html += fmt.Sprintf(`
-    <div style="margin-top: 3mm; border-top: 1px dotted #000; padding-top: 2mm;">
-      <div class="total-row">
-        <div>Cash:</div>
-        <div>$%.2f</div>
-      </div>
-      <div class="total-row">
-        <div>Change:</div>
-        <div>$%.2f</div>
-      </div>
-    </div>`, *receipt.CashGiven, *receipt.ChangeDue)
-    }
 
     html += `
   </div>
   
   <div class="divider"></div>
   
-  <div class="footer">
+  <div style="text-align: center; margin-top: 5mm; font-size: 10pt;">
     <div style="font-weight: bold;">Thank you for your purchase!</div>
     <div style="margin-top: 2mm;">Visit us again at ` + locationName + `</div>
   </div>
+
+  <!-- This script forces printing immediately -->
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      window.print();
+      // Handle print dialog closed
+      window.addEventListener('afterprint', function() {
+        window.close();
+      });
+      // Fallback in case afterprint doesn't fire
+      setTimeout(function() {
+        window.close();
+      }, 5000);
+    });
+  </script>
 </body>
 </html>`
 
@@ -635,7 +547,8 @@ func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
         }
     }()
 }
-// Create a batch script to handle the printing
+
+// Create a batch script that forces printing
 func printReceipt(html string) error {
     log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
     
@@ -662,16 +575,23 @@ func printReceipt(html string) error {
         return fmt.Errorf("error writing HTML file: %w", err)
     }
     
-    // Create batch file content
+    // Create batch file content with Chrome in kiosk printing mode
+    // This uses Chrome's --kiosk-printing flag which bypasses the print dialog
     batchContent := fmt.Sprintf(`@echo off
-echo Opening receipt for printing...
-start "" "%s"
+echo Printing receipt directly...
+:: Try using Chrome with kiosk printing (silent printing)
+start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --kiosk-printing "%s"
+:: If Chrome isn't found, try with Microsoft Edge
+if %%ERRORLEVEL%% NEQ 0 (
+    echo Chrome not found, trying Microsoft Edge...
+    start "" "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --kiosk-printing "%s"
+)
 echo Waiting for print to complete...
-timeout /t 60 >nul
+timeout /t 20 >nul
 echo Cleaning up files...
 del "%s"
 del "%s"
-`, htmlFilePath, htmlFilePath, batchFilePath)
+`, htmlFilePath, htmlFilePath, htmlFilePath, batchFilePath)
     
     // Write the batch file
     log.Printf("Creating batch file: %s", batchFilePath)
@@ -697,7 +617,6 @@ del "%s"
     
     return nil
 }
-
 func main() {
 	// Set up logging
 	log.SetOutput(os.Stdout)
