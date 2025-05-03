@@ -533,11 +533,13 @@ func printReceipt(html string) error {
     log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
     
     var tmpFilePath string
-    var shouldDeleteFile bool = true
+    
+    // Important: Return success from function BEFORE deleting the file
+    printSuccess := false
 
     if runtime.GOOS == "windows" {
-        // Create temp file in the system temp directory
-        tmpFile, err := ioutil.TempFile(os.TempDir(), "receipt-*.html")
+        // Create temp file in the system temp directory with more unique name to avoid conflicts
+        tmpFile, err := ioutil.TempFile(os.TempDir(), "receipt-*-"+time.Now().Format("20060102150405")+".html")
         if err != nil {
             log.Printf("ERROR: Failed to create temp file: %v", err)
             return fmt.Errorf("error creating temp file: %w", err)
@@ -550,13 +552,11 @@ func printReceipt(html string) error {
         if _, err := tmpFile.Write([]byte(html)); err != nil {
             log.Printf("ERROR: Failed to write to temp file: %v", err)
             tmpFile.Close()
-            os.Remove(tmpFilePath)
             return fmt.Errorf("error writing to temp file: %w", err)
         }
         
         if err := tmpFile.Close(); err != nil {
             log.Printf("ERROR: Failed to close temp file: %v", err)
-            os.Remove(tmpFilePath)
             return fmt.Errorf("error closing temp file: %w", err)
         }
         
@@ -564,16 +564,14 @@ func printReceipt(html string) error {
         absolutePath, err := filepath.Abs(tmpFilePath)
         if err != nil {
             log.Printf("ERROR: Failed to get absolute path: %v", err)
-            os.Remove(tmpFilePath)
             return fmt.Errorf("error getting absolute path: %w", err)
         }
         log.Printf("Absolute path: %s", absolutePath)
         
-        // Skip Method 1 and go directly to Method 2
-        log.Printf("Using Method 2: MSEdge with silent printing...")
+        // Try Edge printing first
+        log.Printf("Using Method 1: MSEdge with silent printing...")
         
         // Use the Edge browser to print in silent mode
-        // This approach is more reliable for HTML content
         edgeCmd := exec.Command(
             "msedge",
             "--disable-gpu",
@@ -591,14 +589,12 @@ func printReceipt(html string) error {
         edgeCmd.Stderr = &edgeErrorBuf
         
         log.Printf("Executing Edge print command")
-        printSuccess := false
-        
         if err := edgeCmd.Run(); err != nil {
             log.Printf("Edge method ERROR: %v", err)
             log.Printf("Edge method STDERR: %s", edgeErrorBuf.String())
             
-            // Fallback to direct printer access via PowerShell
-            log.Printf("Trying Method 3: Direct printer access via PowerShell...")
+            // Fallback to PowerShell method
+            log.Printf("Trying Method 2: PowerShell printing...")
             
             // Get default printer name
             printerCmd := exec.Command("powershell", "-Command", "Get-WmiObject -Query \"SELECT * FROM Win32_Printer WHERE Default=$true\" | Select-Object -ExpandProperty Name")
@@ -607,195 +603,197 @@ func printReceipt(html string) error {
             
             if err := printerCmd.Run(); err != nil {
                 log.Printf("WARNING: Could not get default printer name: %v", err)
-                // Continue with empty printer name, Windows will use default
             }
             
             printerName := strings.TrimSpace(printerBuf.String())
+            if printerName == "" {
+                printerName = "Microsoft Print to PDF" // Fallback to a standard printer
+            }
             
-            // Use Print.dll for direct printing - no reliance on content display
-            printDllCmd := fmt.Sprintf(`$printerName = "%s"; $filePath = "%s"; Add-Type -Assembly "System.Drawing"; Add-Type -Assembly "System.Windows.Forms"; $printDoc = New-Object System.Drawing.Printing.PrintDocument; $printDoc.PrinterSettings.PrinterName = $printerName; $printDoc.PrintPage += { param($sender, $args) $webBrowser = New-Object System.Windows.Forms.WebBrowser; $webBrowser.DocumentText = Get-Content $filePath -Raw; $webBrowser.DrawToBitmap($args.Graphics, "0,0,$($webBrowser.Width),$($webBrowser.Height)") }; $printDoc.Print()`, printerName, absolutePath)
+            // Try simpler PowerShell print command
+            psCmd := fmt.Sprintf(
+                `Start-Process -FilePath "%s" -Verb Print`,
+                absolutePath,
+            )
             
-            log.Printf("Executing PowerShell direct print command")
-            psDllCmd := exec.Command("powershell", "-Command", printDllCmd)
+            log.Printf("Executing PowerShell simple print command")
+            psPrintCmd := exec.Command("powershell", "-Command", psCmd)
             
-            var psDllOutput, psDllError bytes.Buffer
-            psDllCmd.Stdout = &psDllOutput
-            psDllCmd.Stderr = &psDllError
+            var psOutput, psError bytes.Buffer
+            psPrintCmd.Stdout = &psOutput
+            psPrintCmd.Stderr = &psError
             
-            if err := psDllCmd.Run(); err != nil {
-                log.Printf("Method 3 ERROR: PowerShell direct printing failed: %v", err)
-                log.Printf("Method 3 STDERR: %s", psDllError.String())
+            if err := psPrintCmd.Run(); err != nil {
+                log.Printf("Method 2 ERROR: PowerShell printing failed: %v", err)
+                log.Printf("Method 2 STDERR: %s", psError.String())
                 
-                // Last resort - open in browser and let user print
-                log.Printf("Falling back to browser method...")
+                // Last fallback - open in default browser
+                log.Printf("Falling back to Method 3: Opening in default browser...")
                 browserCmd := exec.Command("cmd", "/c", "start", absolutePath)
                 if err := browserCmd.Run(); err != nil {
-                    log.Printf("ERROR: All print methods failed. Last error: %v", err)
-                    // Keep the file and don't try to delete it
-                    shouldDeleteFile = false
+                    log.Printf("All print methods failed. Last error: %v", err)
                     return fmt.Errorf("all print methods failed: %w", err)
                 } else {
-                    // Browser opened successfully
+                    log.Printf("Browser opened successfully. The user will need to print manually.")
                     printSuccess = true
-                    log.Printf("Opened receipt in browser. Waiting for user to print...")
-                    time.Sleep(30 * time.Second)
+                    // Wait 3 seconds for the browser to open
+                    time.Sleep(3 * time.Second)
                 }
             } else {
-                // PowerShell direct printing succeeded
+                log.Printf("PowerShell printing succeeded")
                 printSuccess = true
-                log.Printf("Method 3: PowerShell direct printing succeeded")
-                // Wait for printing to complete
-                time.Sleep(15 * time.Second)
+                // Wait 5 seconds to let print job initialize
+                time.Sleep(5 * time.Second)
             }
         } else {
-            // Edge printing succeeded
-            printSuccess = true
             log.Printf("Edge printing succeeded")
-            // Wait for printing to complete
-            time.Sleep(10 * time.Second)
+            printSuccess = true
+            // Wait 5 seconds to let print job initialize
+            time.Sleep(5 * time.Second)
+        }
+    } else {
+        // For non-Windows systems
+        tmpFile, err := ioutil.TempFile("", "receipt-*.html")
+        if err != nil {
+            log.Printf("ERROR: Failed to create temp file: %v", err)
+            return fmt.Errorf("error creating temp file: %w", err)
+        }
+        tmpFilePath = tmpFile.Name()
+        log.Printf("Created temporary file: %s", tmpFilePath)
+        
+        // Write the HTML content to the temp file
+        log.Printf("Writing HTML content to file")
+        if _, err := tmpFile.Write([]byte(html)); err != nil {
+            log.Printf("ERROR: Failed to write to temp file: %v", err)
+            tmpFile.Close()
+            return fmt.Errorf("error writing to temp file: %w", err)
+        }
+        if err := tmpFile.Close(); err != nil {
+            log.Printf("ERROR: Failed to close temp file: %v", err)
+            return fmt.Errorf("error closing temp file: %w", err)
         }
         
-        // Only return success if one of the print methods succeeded
-        if !printSuccess {
-            shouldDeleteFile = false
-            return errors.New("failed to print receipt using any available method")
+        // Print the file using the operating system's default printer
+        var cmd *exec.Cmd
+        if runtime.GOOS == "darwin" {
+            // On macOS, use lp command
+            log.Printf("Using lp command to print on macOS")
+            cmd = exec.Command("lp", tmpFilePath)
+        } else {
+            // On Linux, use lp command
+            log.Printf("Using lp command to print on Linux")
+            cmd = exec.Command("lp", tmpFilePath)
         }
-
-	} else {
-		// For non-Windows systems, use the default temp file approach
-		tmpFile, err := ioutil.TempFile("", "receipt-*.html")
-		if err != nil {
-			log.Printf("ERROR: Failed to create temp file: %v", err)
-			return fmt.Errorf("error creating temp file: %w", err)
-		}
-		tmpFilePath = tmpFile.Name()
-		log.Printf("Created temporary file: %s", tmpFilePath)
-		
-		// Write the HTML content to the temp file
-		log.Printf("Writing HTML content to file")
-		if _, err := tmpFile.Write([]byte(html)); err != nil {
-			log.Printf("ERROR: Failed to write to temp file: %v", err)
-			tmpFile.Close()
-			os.Remove(tmpFilePath)
-			return fmt.Errorf("error writing to temp file: %w", err)
-		}
-		if err := tmpFile.Close(); err != nil {
-			log.Printf("ERROR: Failed to close temp file: %v", err)
-			os.Remove(tmpFilePath)
-			return fmt.Errorf("error closing temp file: %w", err)
-		}
-		
-		// Print the file using the operating system's default printer
-		var cmd *exec.Cmd
-		if runtime.GOOS == "darwin" {
-			// On macOS, use lp command
-			log.Printf("Using lp command to print on macOS")
-			cmd = exec.Command("lp", tmpFilePath)
-		} else {
-			// On Linux, use lp command
-			log.Printf("Using lp command to print on Linux")
-			cmd = exec.Command("lp", tmpFilePath)
-		}
-		
-		// Execute the print command
-		var outputBuf, errorBuf bytes.Buffer
-		cmd.Stdout = &outputBuf
-		cmd.Stderr = &errorBuf
-		
-		log.Printf("Executing print command")
-		if err := cmd.Run(); err != nil {
-			log.Printf("ERROR: Print command failed: %v", err)
-			log.Printf("STDERR: %s", errorBuf.String())
-			shouldDeleteFile = false
-			return fmt.Errorf("error printing receipt: %w, stderr: %s", err, errorBuf.String())
-		}
-		
-		log.Printf("Print command executed successfully")
-		
-		// Add a larger delay to ensure the print job is sent before we delete the file
-		log.Printf("Waiting for print job to complete")
-		time.Sleep(5 * time.Second)
-	}
-	
-	// Return success now - before file cleanup
-	log.Printf("=== PRINT RECEIPT FUNCTION COMPLETED SUCCESSFULLY ===")
-	
-	// Clean up temporary file only if we should
-	if shouldDeleteFile {
-        // We'll clean up in a separate goroutine to allow the HTTP response to return first
-        go func(filePath string) {
-            // Wait longer before removing the file
-            time.Sleep(10 * time.Second)
-            log.Printf("Cleaning up temporary file: %s", filePath)
-            if err := os.Remove(filePath); err != nil {
-                log.Printf("WARNING: Failed to remove temporary file: %v", err)
-            } else {
-                log.Printf("Successfully removed temporary file")
-            }
-        }(tmpFilePath)
-    } else {
-        log.Printf("Keeping temporary file for debugging: %s", tmpFilePath)
+        
+        // Execute the print command
+        var outputBuf, errorBuf bytes.Buffer
+        cmd.Stdout = &outputBuf
+        cmd.Stderr = &errorBuf
+        
+        log.Printf("Executing print command")
+        if err := cmd.Run(); err != nil {
+            log.Printf("ERROR: Print command failed: %v", err)
+            log.Printf("STDERR: %s", errorBuf.String())
+            return fmt.Errorf("error printing receipt: %w, stderr: %s", err, errorBuf.String())
+        }
+        
+        log.Printf("Print command executed successfully")
+        printSuccess = true
+        // Wait for print job to initialize
+        time.Sleep(3 * time.Second)
     }
-	
-	return nil
+    
+    // Return success immediately before attempting file deletion
+    if printSuccess {
+        log.Printf("Print process initiated successfully")
+        
+        // Start a goroutine to delete the file after a delay
+        // This allows the HTTP response to be sent before cleanup
+        go func(filePath string) {
+            // Wait longer before attempting to delete
+            time.Sleep(20 * time.Second)
+            log.Printf("Attempting to clean up temporary file: %s", filePath)
+            
+            // Try multiple times to delete the file
+            for i := 0; i < 3; i++ {
+                err := os.Remove(filePath)
+                if err == nil {
+                    log.Printf("Successfully removed temporary file")
+                    return
+                }
+                
+                log.Printf("Failed to remove file (attempt %d): %v", i+1, err)
+                // Wait before trying again
+                time.Sleep(5 * time.Second)
+            }
+            
+            log.Printf("WARNING: Could not remove temporary file after 3 attempts")
+        }(tmpFilePath)
+        
+        log.Printf("=== PRINT RECEIPT FUNCTION COMPLETED SUCCESSFULLY ===")
+        return nil
+    }
+    
+    return errors.New("printing failed")
 }
 
 // handlePrintReceipt processes print requests
 func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Received print receipt request from %s", r.RemoteAddr)
-	
-	// Only accept POST requests
-	if r.Method != http.MethodPost {
-		log.Printf("ERROR: Received non-POST request method: %s", r.Method)
-		writeJSONError(w, http.StatusMethodNotAllowed, errors.New("only POST method is allowed"))
-		return
-	}
+    log.Printf("Received print receipt request from %s", r.RemoteAddr)
+    
+    // Only accept POST requests
+    if r.Method != http.MethodPost {
+        log.Printf("ERROR: Received non-POST request method: %s", r.Method)
+        writeJSONError(w, http.StatusMethodNotAllowed, errors.New("only POST method is allowed"))
+        return
+    }
 
-	// Decode the request body
-	var receipt ReceiptData
-	if err := json.NewDecoder(r.Body).Decode(&receipt); err != nil {
-		log.Printf("ERROR: Failed to decode request body: %v", err)
-		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
-		return
-	}
-	
-	log.Printf("Processing receipt - Transaction ID: %s, Location: %v, Items: %d", 
-		receipt.TransactionID, receipt.Location, len(receipt.Items))
+    // Decode the request body
+    var receipt ReceiptData
+    if err := json.NewDecoder(r.Body).Decode(&receipt); err != nil {
+        log.Printf("ERROR: Failed to decode request body: %v", err)
+        writeJSONError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
+        return
+    }
+    
+    log.Printf("Processing receipt - Transaction ID: %s, Location: %v, Items: %d", 
+        receipt.TransactionID, receipt.Location, len(receipt.Items))
 
-	// Generate HTML for the receipt
-	html := generateReceiptHTML(receipt)
-	log.Printf("Generated HTML receipt content (%d bytes)", len(html))
+    // Generate HTML for the receipt
+    html := generateReceiptHTML(receipt)
+    log.Printf("Generated HTML receipt content (%d bytes)", len(html))
 
-	// Print the receipt
-	if err := printReceipt(html); err != nil {
-		log.Printf("ERROR: Failed to print receipt: %v", err)
-		writeJSONError(w, http.StatusInternalServerError, err)
-		return
-	}
+    // Print the receipt - we send the response BEFORE file cleanup
+    if err := printReceipt(html); err != nil {
+        log.Printf("ERROR: Failed to print receipt: %v", err)
+        writeJSONError(w, http.StatusInternalServerError, err)
+        return
+    }
 
-	log.Printf("Receipt printed successfully")
-	// Return success response
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  "success",
-		"message": "Receipt printed successfully",
-	})
+    // Return success response
+    log.Printf("Receipt printed successfully")
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusOK) // Explicitly set 200 status code
+    json.NewEncoder(w).Encode(map[string]interface{}{
+        "status":  "success",
+        "message": "Receipt printed successfully",
+    })
 }
 
 func main() {
-	// Set up logging
-	log.SetOutput(os.Stdout)
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
-	log.Printf("Starting Receipt and Scanner Application")
-	
-	mux := http.NewServeMux()
-	mux.HandleFunc("/scanner/scan", scannerHandler)
-	mux.HandleFunc("/print/receipt", handlePrintReceipt)
+    // Set up logging
+    log.SetOutput(os.Stdout)
+    log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
+    log.Printf("Starting Receipt and Scanner Application")
+    
+    mux := http.NewServeMux()
+    mux.HandleFunc("/scanner/scan", scannerHandler)
+    mux.HandleFunc("/print/receipt", handlePrintReceipt)
 
-	handler := corsMiddleware(mux)
-	port := 3500 // change port will break front end so don't
-	log.Printf("Starting server on http://localhost:%d", port)
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), handler); err != nil {
-		log.Fatal(err)
-	}
+    handler := corsMiddleware(mux)
+    port := 3500 // change port will break front end so don't
+    log.Printf("Starting server on http://localhost:%d", port)
+    if err := http.ListenAndServe(fmt.Sprintf(":%d", port), handler); err != nil {
+        log.Fatal(err)
+    }
 }
