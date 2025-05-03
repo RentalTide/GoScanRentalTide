@@ -533,60 +533,95 @@ func printReceipt(html string) error {
 	// Set up logging for the function
 	log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
 	
-	// Path for the temporary file - using a different approach for Windows
+	// Path for the temporary file
 	var tmpFilePath string
 
 	if runtime.GOOS == "windows" {
-		// On Windows, create the temp file in a reliable location
-		homeDir, err := os.UserHomeDir()
+		// Create temp file in the system temp directory which should be writable
+		tmpFile, err := ioutil.TempFile(os.TempDir(), "receipt-*.html")
 		if err != nil {
-			log.Printf("ERROR: Failed to get user home directory: %v", err)
-			return fmt.Errorf("error getting user home directory: %w", err)
+			log.Printf("ERROR: Failed to create temp file: %v", err)
+			return fmt.Errorf("error creating temp file: %w", err)
 		}
-		log.Printf("User home directory: %s", homeDir)
+		tmpFilePath = tmpFile.Name()
+		log.Printf("Created temporary file at system temp location: %s", tmpFilePath)
 		
-		// Create a subfolder for our app if it doesn't exist
-		receiptsDir := filepath.Join(homeDir, "ReceiptPrinter")
-		if _, err := os.Stat(receiptsDir); os.IsNotExist(err) {
-			log.Printf("Creating receipts directory at: %s", receiptsDir)
-			if err := os.Mkdir(receiptsDir, 0755); err != nil {
-				log.Printf("ERROR: Failed to create receipts directory: %v", err)
-				return fmt.Errorf("error creating receipts directory: %w", err)
-			}
-		}
-		
-		// Use a timestamp to avoid conflicts
-		timestamp := time.Now().Format("20060102150405")
-		tmpFilePath = filepath.Join(receiptsDir, fmt.Sprintf("receipt-%s.html", timestamp))
-		
-		// Write the HTML to the file
-		log.Printf("Writing HTML content to file: %s", tmpFilePath)
-		err = ioutil.WriteFile(tmpFilePath, []byte(html), 0644)
-		if err != nil {
-			log.Printf("ERROR: Failed to write HTML to temp file: %v", err)
+		// Write the HTML content to the temp file
+		log.Printf("Writing HTML content to file (%d bytes)", len(html))
+		if _, err := tmpFile.Write([]byte(html)); err != nil {
+			log.Printf("ERROR: Failed to write to temp file: %v", err)
+			tmpFile.Close()
+			os.Remove(tmpFilePath)
 			return fmt.Errorf("error writing to temp file: %w", err)
 		}
-		log.Printf("Successfully wrote HTML content to file")
 		
-		// Now we'll use a much simpler approach - just open the file in the default browser with the print flag
-		// This avoids issues with IE automation, PowerShell permissions, or VBScript
+		if err := tmpFile.Close(); err != nil {
+			log.Printf("ERROR: Failed to close temp file: %v", err)
+			os.Remove(tmpFilePath)
+			return fmt.Errorf("error closing temp file: %w", err)
+		}
 		
-		log.Printf("Opening HTML file with the default system browser")
-		cmd := exec.Command("cmd", "/c", "start", tmpFilePath)
+		// Get absolute path for the file
+		absolutePath, err := filepath.Abs(tmpFilePath)
+		if err != nil {
+			log.Printf("ERROR: Failed to get absolute path: %v", err)
+			os.Remove(tmpFilePath)
+			return fmt.Errorf("error getting absolute path: %w", err)
+		}
+		log.Printf("Absolute path: %s", absolutePath)
+		
+		// Method 1: Use PowerShell to print with .NET
+		log.Printf("Trying Method 1: .NET Printing via PowerShell...")
+		psCommand := fmt.Sprintf(`Add-Type -AssemblyName PresentationCore; Add-Type -AssemblyName PresentationFramework; Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $printDoc = New-Object System.Drawing.Printing.PrintDocument; $printDoc.DocumentName = '%s'; $printDoc.Print()`, filepath.Base(tmpFilePath))
+		cmd := exec.Command("powershell", "-Command", psCommand)
+		
 		var outputBuf, errorBuf bytes.Buffer
 		cmd.Stdout = &outputBuf
 		cmd.Stderr = &errorBuf
 		
 		if err := cmd.Run(); err != nil {
-			log.Printf("ERROR: Failed to open HTML file with browser: %v", err)
-			log.Printf("STDERR: %s", errorBuf.String())
-			return fmt.Errorf("error opening HTML file with browser: %w", err)
+			log.Printf("Method 1 ERROR: Failed to print with .NET: %v", err)
+			log.Printf("Method 1 STDERR: %s", errorBuf.String())
+			log.Printf("Method 1 STDOUT: %s", outputBuf.String())
+			
+			// Try Method 2 if Method 1 fails
+			log.Printf("Trying Method 2: PrintUI.dll approach...")
+			
+			// Get default printer name
+			printerCmd := exec.Command("powershell", "-Command", "Get-WmiObject -Query \"SELECT * FROM Win32_Printer WHERE Default=$true\" | Select-Object -ExpandProperty Name")
+			var printerBuf bytes.Buffer
+			printerCmd.Stdout = &printerBuf
+			
+			if err := printerCmd.Run(); err != nil {
+				log.Printf("WARNING: Could not get default printer name: %v", err)
+				// Continue with empty printer name, Windows will use default
+			}
+			
+			printerName := strings.TrimSpace(printerBuf.String())
+			printUICmd := fmt.Sprintf("rundll32 printui.dll,PrintUIEntry /k /n\"%s\" /f\"%s\"", printerName, absolutePath)
+			log.Printf("Executing command: %s", printUICmd)
+			
+			cmdPrintUI := exec.Command("cmd", "/c", printUICmd)
+			if err := cmdPrintUI.Run(); err != nil {
+				log.Printf("Method 2 ERROR: PrintUI approach failed: %v", err)
+				
+				// Fallback to opening in browser as last resort
+				log.Printf("Falling back to browser method...")
+				browserCmd := exec.Command("cmd", "/c", "start", absolutePath)
+				if err := browserCmd.Run(); err != nil {
+					log.Printf("ERROR: All print methods failed. Last error: %v", err)
+					os.Remove(tmpFilePath)
+					return fmt.Errorf("all print methods failed: %w", err)
+				}
+			} else {
+				log.Printf("Method 2: PrintUI command executed successfully")
+			}
+		} else {
+			log.Printf("Method 1: .NET printing succeeded")
 		}
 		
-		log.Printf("Successfully opened HTML file with browser - auto print script should execute")
-		
-		// Wait a reasonable amount of time for the print dialog to appear and print
-		log.Printf("Waiting for print operation to complete...")
+		// Wait for printing to complete before cleaning up
+		log.Printf("Waiting for print job to complete...")
 		time.Sleep(5 * time.Second)
 		
 	} else {
@@ -644,15 +679,13 @@ func printReceipt(html string) error {
 		time.Sleep(2 * time.Second)
 	}
 	
-	// Create a deferred cleanup to remove the temp file after printing
+	// Clean up temporary file
 	log.Printf("Cleaning up temporary file: %s", tmpFilePath)
-	defer func() {
-		if err := os.Remove(tmpFilePath); err != nil {
-			log.Printf("WARNING: Failed to remove temporary file: %v", err)
-		} else {
-			log.Printf("Successfully removed temporary file")
-		}
-	}()
+	if err := os.Remove(tmpFilePath); err != nil {
+		log.Printf("WARNING: Failed to remove temporary file: %v", err)
+	} else {
+		log.Printf("Successfully removed temporary file")
+	}
 	
 	log.Printf("=== PRINT RECEIPT FUNCTION COMPLETED SUCCESSFULLY ===")
 	return nil
