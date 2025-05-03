@@ -481,7 +481,37 @@ func generateReceiptHTML(receipt ReceiptData) string {
     return html
 }
 
-// Updated handler
+
+// Simplified printReceipt that only creates the file
+func printReceipt(html string) (string, error) {
+    log.Printf("=== CREATING RECEIPT FILE ===")
+    
+    // Get current directory
+    currentDir, err := os.Getwd()
+    if err != nil {
+        log.Printf("ERROR: Failed to get current directory: %v", err)
+        return "", fmt.Errorf("error getting current directory: %w", err)
+    }
+    
+    // Create a unique filename with PRINT_ME prefix
+    timestamp := fmt.Sprintf("%d", time.Now().UnixNano())
+    htmlFileName := fmt.Sprintf("PRINT_ME_receipt_%s.html", timestamp)
+    htmlFilePath := filepath.Join(currentDir, htmlFileName)
+    
+    // Write the HTML content to file
+    log.Printf("Creating HTML file: %s", htmlFilePath)
+    err = ioutil.WriteFile(htmlFilePath, []byte(html), 0644)
+    if err != nil {
+        log.Printf("ERROR: Failed to write HTML file: %v", err)
+        return "", fmt.Errorf("error writing HTML file: %w", err)
+    }
+    
+    log.Printf("Receipt file created successfully: %s", htmlFilePath)
+    
+    return htmlFilePath, nil
+}
+
+// Updated handler that just returns the file path
 func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
     log.Printf("Received print receipt request from %s", r.RemoteAddr)
     
@@ -503,97 +533,25 @@ func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
     log.Printf("Processing receipt - Transaction ID: %s, Items: %d", 
         receipt.TransactionID, len(receipt.Items))
 
-    // Generate HTML for the receipt with improved styling
+    // Generate HTML for the receipt
     html := generateReceiptHTML(receipt)
     
-    // Send success response immediately
+    // Create the file and get the path
+    filePath, err := printReceipt(html)
+    if err != nil {
+        log.Printf("ERROR: Failed to create receipt file: %v", err)
+        writeJSONError(w, http.StatusInternalServerError, err)
+        return
+    }
+    
+    // Return success with the file path
+    log.Printf("Returning file path to client: %s", filePath)
     w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusOK)
     json.NewEncoder(w).Encode(map[string]interface{}{
         "status":  "success",
-        "message": "Receipt print job submitted successfully",
+        "message": "Receipt file created successfully. Please open and print manually.",
+        "filePath": filePath,
     })
-    
-    // Process printing in background
-    go func() {
-        if err := printReceipt(html); err != nil {
-            log.Printf("ERROR: Failed to print receipt: %v", err)
-        }
-    }()
-}
-
-
-// Fixed printReceipt function with corrected batch file syntax
-func printReceipt(html string) error {
-    log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
-    
-    // Get current directory
-    currentDir, err := os.Getwd()
-    if err != nil {
-        log.Printf("ERROR: Failed to get current directory: %v", err)
-        return fmt.Errorf("error getting current directory: %w", err)
-    }
-    
-    // Create unique filenames for the HTML file
-    timestamp := fmt.Sprintf("%d", time.Now().UnixNano())
-    htmlFileName := fmt.Sprintf("receipt-%s.html", timestamp)
-    htmlFilePath := filepath.Join(currentDir, htmlFileName)
-    
-    // Write the HTML content to file
-    log.Printf("Creating HTML file: %s", htmlFilePath)
-    err = ioutil.WriteFile(htmlFilePath, []byte(html), 0644)
-    if err != nil {
-        log.Printf("ERROR: Failed to write HTML file: %v", err)
-        return fmt.Errorf("error writing HTML file: %w", err)
-    }
-    
-    // Create a much simpler batch file with direct commands
-    batchContent := fmt.Sprintf(`@echo off
-echo Opening receipt in default browser...
-start "" "%s"
-echo Waiting for print to complete...
-timeout /t 20
-echo Done
-`, htmlFilePath)
-    
-    // Create a temporary batch file
-    batchFileName := fmt.Sprintf("print-%s.bat", timestamp)
-    batchFilePath := filepath.Join(currentDir, batchFileName)
-    
-    log.Printf("Creating batch file: %s", batchFilePath)
-    err = ioutil.WriteFile(batchFilePath, []byte(batchContent), 0644)
-    if err != nil {
-        log.Printf("ERROR: Failed to write batch file: %v", err)
-        os.Remove(htmlFilePath)
-        return fmt.Errorf("error writing batch file: %w", err)
-    }
-    
-    // Execute the batch file
-    log.Printf("Executing batch file")
-    cmd := exec.Command("cmd", "/c", batchFilePath)
-    if err := cmd.Run(); err != nil {
-        log.Printf("ERROR: Failed to execute batch file: %v", err)
-        os.Remove(htmlFilePath)
-        os.Remove(batchFilePath)
-        return fmt.Errorf("error executing batch file: %w", err)
-    }
-    
-    log.Printf("Batch file executed successfully")
-    
-    // Start a background goroutine to clean up the files after a delay
-    go func() {
-        // Wait for a while to ensure printing completes
-        time.Sleep(30 * time.Second)
-        
-        // Clean up files
-        os.Remove(htmlFilePath)
-        os.Remove(batchFilePath)
-        
-        log.Printf("Cleanup completed")
-    }()
-    
-    log.Printf("=== PRINT RECEIPT FUNCTION COMPLETED ===")
-    return nil
 }
 
 func main() {
