@@ -523,7 +523,7 @@ func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
 }
 
 
-// Simplified printReceipt using direct printing commands
+// Fixed printReceipt function with corrected batch file syntax
 func printReceipt(html string) error {
     log.Printf("=== PRINT RECEIPT FUNCTION STARTED ===")
     
@@ -534,13 +534,10 @@ func printReceipt(html string) error {
         return fmt.Errorf("error getting current directory: %w", err)
     }
     
-    // Create unique filenames
+    // Create unique filenames for the HTML file
     timestamp := fmt.Sprintf("%d", time.Now().UnixNano())
     htmlFileName := fmt.Sprintf("receipt-%s.html", timestamp)
-    batchFileName := fmt.Sprintf("print-%s.bat", timestamp)
-    
     htmlFilePath := filepath.Join(currentDir, htmlFileName)
-    batchFilePath := filepath.Join(currentDir, batchFileName)
     
     // Write the HTML content to file
     log.Printf("Creating HTML file: %s", htmlFilePath)
@@ -550,32 +547,30 @@ func printReceipt(html string) error {
         return fmt.Errorf("error writing HTML file: %w", err)
     }
     
-    // Create a very simple batch file that uses the Windows print command
+    // Create a much simpler batch file with direct commands
     batchContent := fmt.Sprintf(`@echo off
-echo Printing receipt...
-:: Use direct Windows print command
-print "%s"
-
-echo Print command sent, waiting...
-timeout /t 10 >nul
-echo Cleaning up...
-del "%s"
-del "%s"
-echo Done.
-`, htmlFilePath, htmlFilePath, batchFilePath)
+echo Opening receipt in default browser...
+start "" "%s"
+echo Waiting for print to complete...
+timeout /t 20
+echo Done
+`, htmlFilePath)
     
-    // Write the batch file
+    // Create a temporary batch file
+    batchFileName := fmt.Sprintf("print-%s.bat", timestamp)
+    batchFilePath := filepath.Join(currentDir, batchFileName)
+    
     log.Printf("Creating batch file: %s", batchFilePath)
-    err = ioutil.WriteFile(batchFilePath, []byte(batchContent), 0755)
+    err = ioutil.WriteFile(batchFilePath, []byte(batchContent), 0644)
     if err != nil {
         log.Printf("ERROR: Failed to write batch file: %v", err)
         os.Remove(htmlFilePath)
         return fmt.Errorf("error writing batch file: %w", err)
     }
     
-    // Execute the batch file with higher visibility (not minimized)
+    // Execute the batch file
     log.Printf("Executing batch file")
-    cmd := exec.Command("cmd", "/c", "start", batchFilePath)
+    cmd := exec.Command("cmd", "/c", batchFilePath)
     if err := cmd.Run(); err != nil {
         log.Printf("ERROR: Failed to execute batch file: %v", err)
         os.Remove(htmlFilePath)
@@ -584,11 +579,22 @@ echo Done.
     }
     
     log.Printf("Batch file executed successfully")
-    log.Printf("=== PRINT RECEIPT FUNCTION COMPLETED ===")
     
+    // Start a background goroutine to clean up the files after a delay
+    go func() {
+        // Wait for a while to ensure printing completes
+        time.Sleep(30 * time.Second)
+        
+        // Clean up files
+        os.Remove(htmlFilePath)
+        os.Remove(batchFilePath)
+        
+        log.Printf("Cleanup completed")
+    }()
+    
+    log.Printf("=== PRINT RECEIPT FUNCTION COMPLETED ===")
     return nil
 }
-
 
 func main() {
 	// Set up logging
