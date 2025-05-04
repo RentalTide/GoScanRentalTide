@@ -1,0 +1,5 @@
+flask
+pyserial
+
+
+pyinstaller --onefile --windowed --icon=wricon.ico --name="RentalTide" scanner.py
