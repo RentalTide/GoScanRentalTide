@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"runtime"
 	"strings"
@@ -14,6 +16,16 @@ import (
 
 	"go.bug.st/serial"
 )
+
+// Configuration for the app
+type Config struct {
+	Port    string
+	BaudRate int
+	ServerPort int
+}
+
+// Global configuration
+var config Config
 
 // LicenseData type for NA driver's license data.
 type LicenseData struct {
@@ -147,6 +159,13 @@ func parseLicenseData(raw string) LicenseData {
 
 // findScannerPort finds ports
 func findScannerPort() (string, error) {
+	// If a port is specified in the config, use that directly
+	if config.Port != "" {
+		log.Printf("Using configured port: %s", config.Port)
+		return config.Port, nil
+	}
+
+	// List all available ports
 	ports, err := serial.GetPortsList()
 	if err != nil {
 		return "", fmt.Errorf("failed to list serial ports: %w", err)
@@ -155,11 +174,15 @@ func findScannerPort() (string, error) {
 		return "", errors.New("no serial ports found")
 	}
 
+	// Log all available ports to help with debugging
+	log.Printf("Available ports: %v", ports)
+
 	// On Windows, choose a port starting with "COM".
 	// On macOS, look for "usbserial" in the name.
 	for _, port := range ports {
 		if runtime.GOOS == "windows" {
 			if strings.HasPrefix(strings.ToLower(port), "com") {
+				log.Printf("Selected port on Windows: %s", port)
 				return port, nil
 			}
 		} else if runtime.GOOS == "darwin" {
@@ -173,7 +196,7 @@ func findScannerPort() (string, error) {
 			}
 		}
 	}
-	return "", errors.New("no compatible serial port found")
+	return "", errors.New("no compatible serial port found. Available ports: " + strings.Join(ports, ", "))
 }
 
 // readWithTimeout wraps the port.Read call in a goroutine with a timeout.
@@ -205,11 +228,13 @@ func sendScannerCommand(commandStr string) (string, error) {
 	}
 
 	mode := &serial.Mode{
-		BaudRate: 9600,
-		DataBits: 8,
+		BaudRate: config.BaudRate,
+		DataBits: 7, // Changed from 8 to 7 to match Windows ports configuration
 		Parity:   serial.NoParity,
 		StopBits: serial.OneStopBit,
 	}
+	
+	log.Printf("Opening port %s with baud rate %d", portName, config.BaudRate)
 	port, err := serial.Open(portName, mode)
 	if err != nil {
 		return "", fmt.Errorf("failed to open port %s: %w", portName, err)
@@ -221,6 +246,7 @@ func sendScannerCommand(commandStr string) (string, error) {
 	cmdBuffer = append(cmdBuffer, []byte(commandStr)...)
 	cmdBuffer = append(cmdBuffer, 0x04)
 
+	log.Printf("Sending command: %s", commandStr)
 	n, err := port.Write(cmdBuffer)
 	if err != nil {
 		return "", fmt.Errorf("failed to write to port: %w", err)
@@ -235,21 +261,32 @@ func sendScannerCommand(commandStr string) (string, error) {
 	deadline := time.Now().Add(maxDuration)
 	tmp := make([]byte, 128)
 
+	log.Printf("Reading response...")
 	for {
 		n, err := readWithTimeout(port, tmp, readTimeout)
 		if err != nil {
 			if err.Error() == "read timeout" {
+				log.Printf("Read timeout reached")
 				break
 			}
 			return "", fmt.Errorf("error reading from port: %w", err)
 		}
 		responseBuffer.Write(tmp[:n])
 		if time.Now().After(deadline) {
+			log.Printf("Maximum duration reached")
 			break
 		}
 	}
 
-	return responseBuffer.String(), nil
+	response := responseBuffer.String()
+	// Only log a portion of the response if it's very long
+	if len(response) > 100 {
+		log.Printf("Received response (truncated): %s...", response[:100])
+	} else {
+		log.Printf("Received response: %s", response)
+	}
+	
+	return response, nil
 }
 
 // writes JSON errors
@@ -301,14 +338,69 @@ func scannerHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// Handler for listing all available serial ports
+func listPortsHandler(w http.ResponseWriter, r *http.Request) {
+	ports, err := serial.GetPortsList()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	response := map[string]interface{}{
+		"status": "success",
+		"ports":  ports,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
 func main() {
+	// Parse command-line flags
+	portFlag := flag.String("port", "", "Specify the COM port to use (e.g., COM3)")
+	baudrateFlag := flag.Int("baud", 1200, "Specify the baud rate") // Changed default from 9600 to 1200
+	serverPortFlag := flag.Int("server-port", 3500, "Specify the HTTP server port")
+	
+	// Help message
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "License Scanner API\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Options:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nExample: %s -port=COM3 -baud=9600\n", os.Args[0])
+	}
+	
+	flag.Parse()
+
+	// Set up configuration
+	config = Config{
+		Port:    *portFlag,
+		BaudRate: *baudrateFlag,
+		ServerPort: *serverPortFlag,
+	}
+
+	// Log startup information
+	log.Printf("Starting with configuration:")
+	log.Printf("  Port: %s (empty means auto-detect)", config.Port)
+	log.Printf("  Baud Rate: %d", config.BaudRate)
+	log.Printf("  Server Port: %d", config.ServerPort)
+
+	// List available ports at startup
+	ports, err := serial.GetPortsList()
+	if err != nil {
+		log.Printf("Warning: Failed to list serial ports: %v", err)
+	} else {
+		log.Printf("Available ports: %v", ports)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/scanner/scan", scannerHandler)
+	mux.HandleFunc("/scanner/ports", listPortsHandler)
 
 	handler := corsMiddleware(mux)
-	port := 3500 // change port will break front end so don't
-	log.Printf("Starting server on http://localhost:%d", port)
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), handler); err != nil {
+	serverAddr := fmt.Sprintf(":%d", config.ServerPort)
+	log.Printf("Starting server on http://localhost%s", serverAddr)
+	if err := http.ListenAndServe(serverAddr, handler); err != nil {
 		log.Fatal(err)
 	}
 }
