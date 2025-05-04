@@ -1,3 +1,0 @@
-([('main',
-   '/Users/nsutherland/Documents/GitHub/GoScanRentalTide/dist/main',
-   'EXECUTABLE')],)
