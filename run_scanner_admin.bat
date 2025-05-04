@@ -1,0 +1,3 @@
+@echo off
+echo Launching scanner with administrator privileges...
+powershell -Command "Start-Process -FilePath '%~dp0scanner.exe' -ArgumentList '%*' -Verb RunAs"
