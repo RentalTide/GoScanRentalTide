@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"regexp"
 	"runtime"
 	"strings"
@@ -16,9 +14,6 @@ import (
 
 	"go.bug.st/serial"
 )
-
-// Global variable to store manually specified port
-var manualPort string
 
 // LicenseData type for NA driver's license data.
 type LicenseData struct {
@@ -152,69 +147,32 @@ func parseLicenseData(raw string) LicenseData {
 
 // findScannerPort finds ports
 func findScannerPort() (string, error) {
-	// Check if manual port is specified first
-	if manualPort != "" {
-		log.Printf("Using manually specified port: %s", manualPort)
-		return manualPort, nil
-	}
-	
 	ports, err := serial.GetPortsList()
 	if err != nil {
 		return "", fmt.Errorf("failed to list serial ports: %w", err)
 	}
-	
-	// Log all available ports for debugging
-	log.Printf("Available serial ports: %v", ports)
-	
 	if len(ports) == 0 {
 		return "", errors.New("no serial ports found")
 	}
 
 	// On Windows, choose a port starting with "COM".
 	// On macOS, look for "usbserial" in the name.
-	if runtime.GOOS == "windows" {
-		// First try to find an exact match for common scanner ports
-		// Try ports in order from most to least common for scanners
-		commonPorts := []string{"COM4", "COM3", "COM5", "COM1"}
-		for _, commonPort := range commonPorts {
-			for _, port := range ports {
-				if strings.EqualFold(port, commonPort) {
-					log.Printf("Found likely scanner port: %s", port)
-					return port, nil
-				}
-			}
-		}
-		
-		// If no common port found, use first available COM port
-		for _, port := range ports {
-			if strings.HasPrefix(strings.ToUpper(port), "COM") {
-				log.Printf("Using first available COM port: %s", port)
+	for _, port := range ports {
+		if runtime.GOOS == "windows" {
+			if strings.HasPrefix(strings.ToLower(port), "com") {
 				return port, nil
 			}
-		}
-	} else if runtime.GOOS == "darwin" {
-		// macOS logic unchanged
-		for _, port := range ports {
+		} else if runtime.GOOS == "darwin" {
 			if strings.Contains(strings.ToLower(port), "usbserial") {
 				return port, nil
 			}
-		}
-	} else {
-		// Linux logic unchanged
-		for _, port := range ports {
+		} else {
+			// For Linux, adjust criteria as needed.
 			if strings.Contains(strings.ToLower(port), "ttyusb") || strings.Contains(strings.ToLower(port), "usb") {
 				return port, nil
 			}
 		}
 	}
-	
-	// If we got here, no compatible port was found
-	// As a last resort, just use the first port in the list if there are any
-	if len(ports) > 0 {
-		log.Printf("No preferred port found. Using first available port: %s", ports[0])
-		return ports[0], nil
-	}
-	
 	return "", errors.New("no compatible serial port found")
 }
 
@@ -309,7 +267,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// For development, allow all origins. Adjust as needed.
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			return
@@ -344,30 +302,6 @@ func scannerHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// Set up logging
-	log.SetOutput(os.Stdout)
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
-	log.Printf("Starting Scanner Application")
-	
-	// Add command line flag for manual port specification
-	portFlag := flag.String("port", "", "Manually specify COM port (e.g., COM4)")
-	flag.Parse()
-	
-	// If port flag is set, override the automatic detection
-	if *portFlag != "" {
-		log.Printf("Using manually specified port: %s", *portFlag)
-		// Set the global variable to hold the manually specified port
-		manualPort = *portFlag
-	}
-	
-	// Log available ports for debugging
-	ports, err := serial.GetPortsList()
-	if err != nil {
-		log.Printf("Warning: Could not list serial ports: %v", err)
-	} else {
-		log.Printf("Available serial ports: %v", ports)
-	}
-	
 	mux := http.NewServeMux()
 	mux.HandleFunc("/scanner/scan", scannerHandler)
 
