@@ -11,7 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
-
+	"flag"
 	"go.bug.st/serial"
 )
 
@@ -126,7 +126,12 @@ func parseLicenseData(raw string) LicenseData {
 	}
 }
 
-func findScannerPort() (string, error) {
+func findScannerPort(portOverride string) (string, error) {
+	// If a port is explicitly provided, use that
+	if portOverride != "" {
+		return portOverride, nil
+	}
+
 	ports, err := serial.GetPortsList()
 	if err != nil {
 		return "", err
@@ -134,7 +139,11 @@ func findScannerPort() (string, error) {
 	if len(ports) == 0 {
 		return "", errors.New("no serial ports found")
 	}
+
+	fmt.Println("Available ports:", ports) // Add this line for debugging
+
 	for _, port := range ports {
+		fmt.Println("Checking port:", port) // More debugging
 		if runtime.GOOS == "windows" && strings.HasPrefix(strings.ToLower(port), "com") {
 			return port, nil
 		} else if runtime.GOOS == "darwin" && strings.Contains(strings.ToLower(port), "usbserial") {
@@ -164,8 +173,8 @@ func readWithTimeout(port serial.Port, buf []byte, timeout time.Duration) (int, 
 	}
 }
 
-func sendScannerCommand(commandStr string) (string, error) {
-	portName, err := findScannerPort()
+func sendScannerCommand(commandStr string, portOverride string) (string, error) {
+	portName, err := findScannerPort(portOverride)
 	if err != nil {
 		return "", err
 	}
@@ -225,9 +234,10 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func scannerHandler(w http.ResponseWriter, r *http.Request) {
-	command := "<TXPING>"
-	result, err := sendScannerCommand(command)
+func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string, scannerPort string) {
+	command := fmt.Sprintf("<TXPING,%s>", scannerPort)
+	result, err := sendScannerCommand(command, portOverride)
+
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
@@ -247,12 +257,18 @@ func scannerHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	scannerPortFlag := flag.String("scanner-port", "CON3", "Scanner port (e.g., CON3, CON4)")
+	portFlag := flag.String("port", "", "Serial port to connect to (e.g., COM1, /dev/ttyUSB0)")
+	httpPortFlag := flag.Int("http-port", 3500, "HTTP server port")
+	flag.Parse()
+	
 	mux := http.NewServeMux()
-	mux.HandleFunc("/scanner/scan", scannerHandler)
-
-	port := 3500
-	log.Printf("Starting server on http://localhost:%d", port)
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), corsMiddleware(mux)); err != nil {
+	mux.HandleFunc("/scanner/scan", func(w http.ResponseWriter, r *http.Request) {
+		scannerHandler(w, r, *portFlag, *scannerPortFlag)
+	})
+	
+	log.Printf("Starting server on http://localhost:%d", *httpPortFlag)
+	if err := http.ListenAndServe(fmt.Sprintf(":%d", *httpPortFlag), corsMiddleware(mux)); err != nil {
 		log.Fatal(err)
 	}
 }
