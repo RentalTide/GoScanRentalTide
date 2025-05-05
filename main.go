@@ -17,10 +17,9 @@ import (
 	"go.bug.st/serial"
 )
 
-// Global variable to store manually specified port
 var manualPort string
+var debugMode = false // Enable with -debug flag
 
-// LicenseData type for NA driver's license data.
 type LicenseData struct {
 	FirstName     string `json:"firstName"`
 	MiddleName    string `json:"middleName"`
@@ -38,9 +37,7 @@ type LicenseData struct {
 	Dob           string `json:"dob"`
 }
 
-// parse and struct
 func parseLicenseData(raw string) LicenseData {
-	// Split into lines and remove empty ones.
 	lines := strings.Split(raw, "\n")
 	var parsedLines []string
 	for _, line := range lines {
@@ -50,41 +47,33 @@ func parseLicenseData(raw string) LicenseData {
 		}
 	}
 
-	// Pirate map
 	data := make(map[string]string)
 	var licenseClass string
 
 	for _, line := range parsedLines {
 		switch {
 		case strings.HasPrefix(line, "DCS"):
-			// Last Name
 			data["lastName"] = strings.TrimSpace(line[3:])
 		case strings.HasPrefix(line, "DAC"):
-			// First Name
 			data["firstName"] = strings.TrimSpace(line[3:])
 		case strings.HasPrefix(line, "DAD"):
-			// Middle Name
 			data["middleName"] = strings.TrimSpace(line[3:])
 		case strings.HasPrefix(line, "DBA"):
-			// Expiry Date in YYYYMMDD format -> YYYY/MM/DD
 			d := strings.TrimSpace(line[3:])
 			if len(d) >= 8 {
 				data["expiryDate"] = fmt.Sprintf("%s/%s/%s", d[0:4], d[4:6], d[6:8])
 			}
 		case strings.HasPrefix(line, "DBD"):
-			// Issue Date
 			d := strings.TrimSpace(line[3:])
 			if len(d) >= 8 {
 				data["issueDate"] = fmt.Sprintf("%s/%s/%s", d[0:4], d[4:6], d[6:8])
 			}
 		case strings.HasPrefix(line, "DBB"):
-			// Date of Birth
 			d := strings.TrimSpace(line[3:])
 			if len(d) >= 8 {
 				data["dob"] = fmt.Sprintf("%s/%s/%s", d[0:4], d[4:6], d[6:8])
 			}
 		case strings.HasPrefix(line, "DBC"):
-			// Sex: assume '1' is Male, '2' is Female
 			s := strings.TrimSpace(line[3:])
 			if s == "1" {
 				data["sex"] = "M"
@@ -94,22 +83,16 @@ func parseLicenseData(raw string) LicenseData {
 				data["sex"] = s
 			}
 		case strings.HasPrefix(line, "DAU"):
-			// Height: remove extra spaces (e.g., "178 cm" -> "178cm")
 			data["height"] = strings.ReplaceAll(strings.TrimSpace(line[3:]), " ", "")
 		case strings.HasPrefix(line, "DAG"):
-			// Street Address
 			data["address"] = strings.TrimSpace(line[3:])
 		case strings.HasPrefix(line, "DAI"):
-			// City
 			data["city"] = strings.TrimSpace(line[3:])
 		case strings.HasPrefix(line, "DAJ"):
-			// State/Province
 			data["state"] = strings.TrimSpace(line[3:])
 		case strings.HasPrefix(line, "DAK"):
-			// Postal Code
 			data["postal"] = strings.TrimSpace(line[3:])
 		case strings.HasPrefix(line, "DAQ"):
-			// License Number: if 15 characters, insert hyphens after 5 and 10 characters
 			ln := strings.TrimSpace(line[3:])
 			if len(ln) == 15 {
 				ln = fmt.Sprintf("%s-%s-%s", ln[0:5], ln[5:10], ln[10:15])
@@ -117,7 +100,6 @@ func parseLicenseData(raw string) LicenseData {
 			data["licenseNumber"] = ln
 		}
 
-		// If the line contains "DCAG", use it to determine license class.
 		if strings.Contains(line, "DCAG") {
 			re := regexp.MustCompile(`DCAG(\w+)`)
 			matches := re.FindStringSubmatch(line)
@@ -127,7 +109,6 @@ func parseLicenseData(raw string) LicenseData {
 		}
 	}
 
-	// Default license class to "NA" if not found.
 	if licenseClass == "" {
 		licenseClass = "NA"
 	}
@@ -150,31 +131,23 @@ func parseLicenseData(raw string) LicenseData {
 	}
 }
 
-// findScannerPort finds ports
 func findScannerPort() (string, error) {
-	// Check if manual port is specified first
 	if manualPort != "" {
 		log.Printf("Using manually specified port: %s", manualPort)
 		return manualPort, nil
 	}
-	
+
 	ports, err := serial.GetPortsList()
 	if err != nil {
 		return "", fmt.Errorf("failed to list serial ports: %w", err)
 	}
-	
-	// Log all available ports for debugging
 	log.Printf("Available serial ports: %v", ports)
-	
+
 	if len(ports) == 0 {
 		return "", errors.New("no serial ports found")
 	}
 
-	// On Windows, choose a port starting with "COM".
-	// On macOS, look for "usbserial" in the name.
 	if runtime.GOOS == "windows" {
-		// First try to find an exact match for common scanner ports
-		// Try ports in order from most to least common for scanners
 		commonPorts := []string{"COM4", "COM3", "COM5", "COM1"}
 		for _, commonPort := range commonPorts {
 			for _, port := range ports {
@@ -184,8 +157,6 @@ func findScannerPort() (string, error) {
 				}
 			}
 		}
-		
-		// If no common port found, use first available COM port
 		for _, port := range ports {
 			if strings.HasPrefix(strings.ToUpper(port), "COM") {
 				log.Printf("Using first available COM port: %s", port)
@@ -193,32 +164,27 @@ func findScannerPort() (string, error) {
 			}
 		}
 	} else if runtime.GOOS == "darwin" {
-		// macOS logic unchanged
 		for _, port := range ports {
 			if strings.Contains(strings.ToLower(port), "usbserial") {
 				return port, nil
 			}
 		}
 	} else {
-		// Linux logic unchanged
 		for _, port := range ports {
 			if strings.Contains(strings.ToLower(port), "ttyusb") || strings.Contains(strings.ToLower(port), "usb") {
 				return port, nil
 			}
 		}
 	}
-	
-	// If we got here, no compatible port was found
-	// As a last resort, just use the first port in the list if there are any
+
 	if len(ports) > 0 {
 		log.Printf("No preferred port found. Using first available port: %s", ports[0])
 		return ports[0], nil
 	}
-	
+
 	return "", errors.New("no compatible serial port found")
 }
 
-// readWithTimeout wraps the port.Read call in a goroutine with a timeout.
 func readWithTimeout(port serial.Port, buf []byte, timeout time.Duration) (int, error) {
 	type readResult struct {
 		n   int
@@ -239,7 +205,6 @@ func readWithTimeout(port serial.Port, buf []byte, timeout time.Duration) (int, 
 	}
 }
 
-// sendScannerCommand opens the serial port, sends the command, and returns the scanner's raw response.
 func sendScannerCommand(commandStr string) (string, error) {
 	portName, err := findScannerPort()
 	if err != nil {
@@ -258,10 +223,14 @@ func sendScannerCommand(commandStr string) (string, error) {
 	}
 	defer port.Close()
 
-	// build SOH (0x01) + command string + EOT (0x04)
 	cmdBuffer := []byte{0x01}
 	cmdBuffer = append(cmdBuffer, []byte(commandStr)...)
 	cmdBuffer = append(cmdBuffer, 0x04)
+
+	if debugMode {
+		log.Printf("Sending command: %q", commandStr)
+		log.Printf("Raw bytes sent: % X", cmdBuffer)
+	}
 
 	n, err := port.Write(cmdBuffer)
 	if err != nil {
@@ -272,8 +241,8 @@ func sendScannerCommand(commandStr string) (string, error) {
 	}
 
 	var responseBuffer bytes.Buffer
-	readTimeout := 3 * time.Second  // timeout after 3 seconds
-	maxDuration := 10 * time.Second // maximum overall timeout of 10
+	readTimeout := 3 * time.Second
+	maxDuration := 10 * time.Second
 	deadline := time.Now().Add(maxDuration)
 	tmp := make([]byte, 128)
 
@@ -285,16 +254,23 @@ func sendScannerCommand(commandStr string) (string, error) {
 			}
 			return "", fmt.Errorf("error reading from port: %w", err)
 		}
+		if debugMode {
+			log.Printf("Received %d bytes: % X", n, tmp[:n])
+			log.Printf("Received string chunk: %q", string(tmp[:n]))
+		}
 		responseBuffer.Write(tmp[:n])
 		if time.Now().After(deadline) {
 			break
 		}
 	}
 
+	if debugMode {
+		log.Printf("Full response string:\n%s", responseBuffer.String())
+	}
+
 	return responseBuffer.String(), nil
 }
 
-// writes JSON errors
 func writeJSONError(w http.ResponseWriter, status int, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -304,10 +280,8 @@ func writeJSONError(w http.ResponseWriter, status int, err error) {
 	})
 }
 
-// support cors
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// For development, allow all origins. Adjust as needed.
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -318,7 +292,6 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// handle http request
 func scannerHandler(w http.ResponseWriter, r *http.Request) {
 	command := "<TXPING>"
 	result, err := sendScannerCommand(command)
@@ -327,52 +300,51 @@ func scannerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If the response is only a NAK (0x15), return a JSON 404 error.
 	if strings.TrimSpace(result) == string(byte(0x15)) {
 		writeJSONError(w, http.StatusNotFound, errors.New("No license scanned or scanner not triggered"))
 		return
 	}
 
 	licenseData := parseLicenseData(result)
+	if debugMode {
+		log.Printf("Parsed license data: %+v", licenseData)
+	}
+
 	response := map[string]interface{}{
 		"status":      "success",
 		"licenseData": licenseData,
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
 
 func main() {
-	// Set up logging
 	log.SetOutput(os.Stdout)
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
 	log.Printf("Starting Scanner Application")
-	
-	// Add command line flag for manual port specification
+
 	portFlag := flag.String("port", "", "Manually specify COM port (e.g., COM4)")
+	debugFlag := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
-	
-	// If port flag is set, override the automatic detection
+
 	if *portFlag != "" {
 		log.Printf("Using manually specified port: %s", *portFlag)
-		// Set the global variable to hold the manually specified port
 		manualPort = *portFlag
 	}
-	
-	// Log available ports for debugging
+	debugMode = *debugFlag
+
 	ports, err := serial.GetPortsList()
 	if err != nil {
 		log.Printf("Warning: Could not list serial ports: %v", err)
 	} else {
 		log.Printf("Available serial ports: %v", ports)
 	}
-	
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/scanner/scan", scannerHandler)
-
 	handler := corsMiddleware(mux)
-	port := 3500 // change port will break front end so don't
+
+	port := 3500
 	log.Printf("Starting server on http://localhost:%d", port)
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), handler); err != nil {
 		log.Fatal(err)
