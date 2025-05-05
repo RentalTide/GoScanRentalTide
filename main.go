@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"regexp"
 	"runtime"
 	"strings"
@@ -16,9 +14,6 @@ import (
 
 	"go.bug.st/serial"
 )
-
-var manualPort string
-var debugMode = false // Enable with -debug flag
 
 type LicenseData struct {
 	FirstName     string `json:"firstName"`
@@ -42,7 +37,7 @@ func parseLicenseData(raw string) LicenseData {
 	var parsedLines []string
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if len(trimmed) > 0 {
+		if trimmed != "" {
 			parsedLines = append(parsedLines, trimmed)
 		}
 	}
@@ -132,57 +127,23 @@ func parseLicenseData(raw string) LicenseData {
 }
 
 func findScannerPort() (string, error) {
-	if manualPort != "" {
-		log.Printf("Using manually specified port: %s", manualPort)
-		return manualPort, nil
-	}
-
 	ports, err := serial.GetPortsList()
 	if err != nil {
-		return "", fmt.Errorf("failed to list serial ports: %w", err)
+		return "", err
 	}
-	log.Printf("Available serial ports: %v", ports)
-
 	if len(ports) == 0 {
 		return "", errors.New("no serial ports found")
 	}
-
-	if runtime.GOOS == "windows" {
-		commonPorts := []string{"COM4", "COM3", "COM5", "COM1"}
-		for _, commonPort := range commonPorts {
-			for _, port := range ports {
-				if strings.EqualFold(port, commonPort) {
-					log.Printf("Found likely scanner port: %s", port)
-					return port, nil
-				}
-			}
-		}
-		for _, port := range ports {
-			if strings.HasPrefix(strings.ToUpper(port), "COM") {
-				log.Printf("Using first available COM port: %s", port)
-				return port, nil
-			}
-		}
-	} else if runtime.GOOS == "darwin" {
-		for _, port := range ports {
-			if strings.Contains(strings.ToLower(port), "usbserial") {
-				return port, nil
-			}
-		}
-	} else {
-		for _, port := range ports {
-			if strings.Contains(strings.ToLower(port), "ttyusb") || strings.Contains(strings.ToLower(port), "usb") {
-				return port, nil
-			}
+	for _, port := range ports {
+		if runtime.GOOS == "windows" && strings.HasPrefix(strings.ToLower(port), "com") {
+			return port, nil
+		} else if runtime.GOOS == "darwin" && strings.Contains(strings.ToLower(port), "usbserial") {
+			return port, nil
+		} else if runtime.GOOS == "linux" && (strings.Contains(port, "ttyUSB") || strings.Contains(port, "usb")) {
+			return port, nil
 		}
 	}
-
-	if len(ports) > 0 {
-		log.Printf("No preferred port found. Using first available port: %s", ports[0])
-		return ports[0], nil
-	}
-
-	return "", errors.New("no compatible serial port found")
+	return "", errors.New("no compatible port found")
 }
 
 func readWithTimeout(port serial.Port, buf []byte, timeout time.Duration) (int, error) {
@@ -191,12 +152,10 @@ func readWithTimeout(port serial.Port, buf []byte, timeout time.Duration) (int, 
 		err error
 	}
 	ch := make(chan readResult, 1)
-
 	go func() {
 		n, err := port.Read(buf)
 		ch <- readResult{n, err}
 	}()
-
 	select {
 	case res := <-ch:
 		return res.n, res.err
@@ -219,62 +178,36 @@ func sendScannerCommand(commandStr string) (string, error) {
 	}
 	port, err := serial.Open(portName, mode)
 	if err != nil {
-		return "", fmt.Errorf("failed to open port %s: %w", portName, err)
+		return "", fmt.Errorf("open port %s failed: %w", portName, err)
 	}
 	defer port.Close()
 
-	cmdBuffer := []byte{0x01}
-	cmdBuffer = append(cmdBuffer, []byte(commandStr)...)
-	cmdBuffer = append(cmdBuffer, 0x04)
-
-	if debugMode {
-		log.Printf("Sending command: %q", commandStr)
-		log.Printf("Raw bytes sent: % X", cmdBuffer)
-	}
-
-	n, err := port.Write(cmdBuffer)
-	if err != nil {
-		return "", fmt.Errorf("failed to write to port: %w", err)
-	}
-	if n != len(cmdBuffer) {
-		return "", errors.New("incomplete write to port")
+	cmd := append([]byte{0x01}, append([]byte(commandStr), 0x04)...)
+	if _, err := port.Write(cmd); err != nil {
+		return "", err
 	}
 
 	var responseBuffer bytes.Buffer
-	readTimeout := 3 * time.Second
-	maxDuration := 10 * time.Second
-	deadline := time.Now().Add(maxDuration)
+	deadline := time.Now().Add(10 * time.Second)
 	tmp := make([]byte, 128)
 
-	for {
-		n, err := readWithTimeout(port, tmp, readTimeout)
+	for time.Now().Before(deadline) {
+		n, err := readWithTimeout(port, tmp, 3*time.Second)
 		if err != nil {
 			if err.Error() == "read timeout" {
 				break
 			}
-			return "", fmt.Errorf("error reading from port: %w", err)
-		}
-		if debugMode {
-			log.Printf("Received %d bytes: % X", n, tmp[:n])
-			log.Printf("Received string chunk: %q", string(tmp[:n]))
+			return "", err
 		}
 		responseBuffer.Write(tmp[:n])
-		if time.Now().After(deadline) {
-			break
-		}
 	}
-
-	if debugMode {
-		log.Printf("Full response string:\n%s", responseBuffer.String())
-	}
-
 	return responseBuffer.String(), nil
 }
 
 func writeJSONError(w http.ResponseWriter, status int, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]string{
 		"status":  "error",
 		"message": err.Error(),
 	})
@@ -283,7 +216,7 @@ func writeJSONError(w http.ResponseWriter, status int, err error) {
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			return
@@ -299,54 +232,27 @@ func scannerHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
-
 	if strings.TrimSpace(result) == string(byte(0x15)) {
-		writeJSONError(w, http.StatusNotFound, errors.New("No license scanned or scanner not triggered"))
+		writeJSONError(w, http.StatusNotFound, errors.New("no license scanned"))
 		return
 	}
 
 	licenseData := parseLicenseData(result)
-	if debugMode {
-		log.Printf("Parsed license data: %+v", licenseData)
-	}
-
-	response := map[string]interface{}{
+	resp := map[string]interface{}{
 		"status":      "success",
 		"licenseData": licenseData,
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	json.NewEncoder(w).Encode(resp)
 }
 
 func main() {
-	log.SetOutput(os.Stdout)
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
-	log.Printf("Starting Scanner Application")
-
-	portFlag := flag.String("port", "", "Manually specify COM port (e.g., COM4)")
-	debugFlag := flag.Bool("debug", false, "Enable debug logging")
-	flag.Parse()
-
-	if *portFlag != "" {
-		log.Printf("Using manually specified port: %s", *portFlag)
-		manualPort = *portFlag
-	}
-	debugMode = *debugFlag
-
-	ports, err := serial.GetPortsList()
-	if err != nil {
-		log.Printf("Warning: Could not list serial ports: %v", err)
-	} else {
-		log.Printf("Available serial ports: %v", ports)
-	}
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/scanner/scan", scannerHandler)
-	handler := corsMiddleware(mux)
 
 	port := 3500
 	log.Printf("Starting server on http://localhost:%d", port)
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), handler); err != nil {
+	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), corsMiddleware(mux)); err != nil {
 		log.Fatal(err)
 	}
 }
