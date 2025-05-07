@@ -68,6 +68,8 @@ type ReceiptData struct {
 	Timestamp          string        `json:"timestamp,omitempty"` // Added for timestamp
 }
 
+// Replace the parseBCLicenseData function with this improved version
+
 func parseBCLicenseData(raw string) LicenseData {
 	fmt.Println("Parsing BC license data from raw input:")
 	fmt.Println(raw)
@@ -96,6 +98,17 @@ func parseBCLicenseData(raw string) LicenseData {
 			cityPart := strings.TrimPrefix(parts[0], "%BC")
 			license.City = strings.TrimSpace(cityPart)
 			fmt.Println("Found city:", license.City)
+			// Set state to BC explicitly for BC licenses
+			license.State = "BC"
+			fmt.Println("Set state to BC for BC license")
+		} else if strings.HasPrefix(parts[0], "%AB") {
+			// Extract city for Alberta licenses
+			cityPart := strings.TrimPrefix(parts[0], "%AB")
+			license.City = strings.TrimSpace(cityPart)
+			fmt.Println("Found city:", license.City)
+			// Set state to AB explicitly for Alberta licenses
+			license.State = "AB"
+			fmt.Println("Set state to AB for Alberta license")
 		}
 	}
 	
@@ -140,24 +153,14 @@ func parseBCLicenseData(raw string) LicenseData {
 			
 			// If we have state/postal information
 			if len(addressParts) > 1 {
-				// Check for province and postal code (usually in the format "CITY PROVINCE POSTAL")
-				statePostalPart := strings.TrimSpace(addressParts[1])
-				statePostalParts := strings.Fields(statePostalPart)
+				// Get the full address part after the $ (has city, state, postal)
+				fullAddressPart := strings.TrimSpace(addressParts[1])
 				
-				if len(statePostalParts) >= 2 {
-					// The city is already extracted from the %BC prefix, but if not, it might be here
-					if license.City == "" && len(statePostalParts) > 2 {
-						license.City = strings.Join(statePostalParts[:len(statePostalParts)-2], " ")
-						fmt.Println("Found city from address part:", license.City)
-					}
-					
-					// Province is typically a 2-letter code
-					license.State = strings.TrimSpace(statePostalParts[len(statePostalParts)-2])
-					fmt.Println("Found state:", license.State)
-					
-					// Postal code is the last part
-					license.Postal = strings.TrimSpace(statePostalParts[len(statePostalParts)-1])
-					fmt.Println("Found postal:", license.Postal)
+				// Extract postal code - look for pattern like V1Y 5K1
+				postalMatch := regexp.MustCompile(`([A-Z][0-9][A-Z]\s*[0-9][A-Z][0-9])`).FindStringSubmatch(fullAddressPart)
+				if len(postalMatch) > 1 {
+					license.Postal = postalMatch[1]
+					fmt.Println("Found postal code:", license.Postal)
 				}
 			}
 		} else {
@@ -173,32 +176,50 @@ func parseBCLicenseData(raw string) LicenseData {
 		fmt.Println("Found licenseNumber:", license.LicenseNumber)
 	}
 	
-	// Specifically handle the case where we have 250119720103 (Jan 3, 1972)
+	// Extract DOB and expiry dates
+	// Look for date pattern in the format =YYYYMMDDXXXX where YYYY is year, MM is month, DD is day
+	// For example, =300319980323 where 300319980323 means:
+	// 1998/03/19 is DOB (YYYY/MM/DD)
+	// 03/23 might be expiry (MM/YY or MM/DD)
+	
 	dateMatch := regexp.MustCompile(`=(\d{12})`).FindStringSubmatch(raw)
 	if len(dateMatch) > 1 && len(dateMatch[1]) == 12 {
 		dateStr := dateMatch[1]
 		
-		// From your example, the format is:
-		// 250119720103
-		// Where 1972 is the year, 01 is the month, 03 is the day
+		// For most BC licenses, the DOB is in this format:
+		// Position 4-5 is month (e.g., 03)
+		// Position 6-7 is day (e.g., 19)
+		// Position 0-3 is year (e.g., 1998)
 		
-		// Look for a 4-digit year pattern
-		yearMatch := regexp.MustCompile(`(\d{4})`).FindStringSubmatch(dateStr)
-		if len(yearMatch) > 1 {
-			year := yearMatch[1]
-			yearIndex := strings.Index(dateStr, year)
+		// Extract individual components - this handles the format seen in your example
+		if len(dateStr) >= 8 {
+			year := dateStr[4:8]  // E.g., 1998
+			month := dateStr[0:2] // E.g., 03
+			day := dateStr[2:4]   // E.g., 19
 			
-			// If we found a valid year
-			if yearIndex >= 0 && yearIndex+4 <= len(dateStr)-4 {
-				// Get month and day that follow the year
-				month := dateStr[yearIndex+4:yearIndex+6]
-				day := dateStr[yearIndex+6:yearIndex+8]
-				
-				// Format the date
-				license.Dob = fmt.Sprintf("%s/%s/%s", year, month, day)
-				fmt.Println("Found birth date:", license.Dob)
+			// Validate that the components make a reasonable date
+			if month >= "01" && month <= "12" && day >= "01" && day <= "31" {
+				// Year should be reasonable (not 3003)
+				if year >= "1900" && year <= "2100" {
+					license.Dob = fmt.Sprintf("%s/%s/%s", year, month, day)
+					fmt.Println("Found dob:", license.Dob)
+				} else {
+					// Try alternative format - sometimes year is at the start
+					altYear := dateStr[0:4]
+					altMonth := dateStr[4:6]
+					altDay := dateStr[6:8]
+					
+					if altYear >= "1900" && altYear <= "2100" && 
+					   altMonth >= "01" && altMonth <= "12" && 
+					   altDay >= "01" && altDay <= "31" {
+						license.Dob = fmt.Sprintf("%s/%s/%s", altYear, altMonth, altDay)
+						fmt.Println("Found dob (alt format):", license.Dob)
+					}
+				}
 			}
 		}
+		
+		// TODO: Extract expiry date from the remaining digits if needed
 	}
 	
 	// Extract sex - "M" for male, "F" for female
@@ -210,10 +231,10 @@ func parseBCLicenseData(raw string) LicenseData {
 		fmt.Println("Found sex: F")
 	}
 	
-	// Extract height - usually in format like "165" (in cm)
+	// Extract height - usually in format like "183" (in cm)
 	heightMatch := regexp.MustCompile(`\s+M(\d{3})\s+`).FindStringSubmatch(raw)
 	if len(heightMatch) > 1 {
-		license.Height = heightMatch[1] + "cm" // Format as "165cm"
+		license.Height = heightMatch[1] + "cm" // Format as "183cm"
 		fmt.Println("Found height:", license.Height)
 	}
 	
