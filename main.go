@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +31,7 @@ type LicenseData struct {
 	Sex           string `json:"sex"`
 	LicenseClass  string `json:"licenseClass"`
 	Dob           string `json:"dob"`
+	RawData       string `json:"rawData"` // Added to show raw data for debugging
 }
 
 func parseLicenseData(raw string) LicenseData {
@@ -123,6 +125,7 @@ func parseLicenseData(raw string) LicenseData {
 		Sex:           data["sex"],
 		LicenseClass:  licenseClass,
 		Dob:           data["dob"],
+		RawData:       raw, // Include raw data for debugging
 	}
 }
 
@@ -183,18 +186,31 @@ func readWithTimeout(port serial.Port, buf []byte, timeout time.Duration) (int, 
 	}
 }
 
-func sendScannerCommand(commandStr string, portOverride string) (string, error) {
+func sendScannerCommand(commandStr string, portOverride string, useMacSettings bool) (string, error) {
 	portName, err := findScannerPort(portOverride)
 	if err != nil {
 		return "", err
 	}
 
-	// Use settings that match COM4
-	mode := &serial.Mode{
-		BaudRate: 1200,    // Changed to match COM4
-		DataBits: 7,       // Changed to match COM4
-		Parity:   serial.NoParity,
-		StopBits: serial.OneStopBit,
+	var mode *serial.Mode
+	if useMacSettings {
+		// Use settings from the Mac version
+		mode = &serial.Mode{
+			BaudRate: 9600,
+			DataBits: 8,
+			Parity:   serial.NoParity,
+			StopBits: serial.OneStopBit,
+		}
+		fmt.Println("Using Mac settings: BaudRate=9600, DataBits=8")
+	} else {
+		// Use settings for Windows COM4
+		mode = &serial.Mode{
+			BaudRate: 1200,
+			DataBits: 7,
+			Parity:   serial.NoParity,
+			StopBits: serial.OneStopBit,
+		}
+		fmt.Println("Using Windows settings: BaudRate=1200, DataBits=7")
 	}
 	
 	fmt.Printf("Opening port %s with settings: BaudRate=%d, DataBits=%d\n", 
@@ -207,6 +223,9 @@ func sendScannerCommand(commandStr string, portOverride string) (string, error) 
 	defer port.Close()
 
 	cmd := append([]byte{0x01}, append([]byte(commandStr), 0x04)...)
+	fmt.Printf("Sending raw bytes (hex): %s\n", hex.EncodeToString(cmd))
+	fmt.Printf("Sending raw bytes (human-readable): %q\n", string(cmd))
+	
 	if _, err := port.Write(cmd); err != nil {
 		return "", err
 	}
@@ -215,17 +234,48 @@ func sendScannerCommand(commandStr string, portOverride string) (string, error) 
 	deadline := time.Now().Add(10 * time.Second)
 	tmp := make([]byte, 128)
 
+	fmt.Println("Waiting for response...")
+	hasReceivedData := false
+
 	for time.Now().Before(deadline) {
 		n, err := readWithTimeout(port, tmp, 3*time.Second)
 		if err != nil {
 			if err.Error() == "read timeout" {
+				fmt.Println("Read timeout reached")
 				break
 			}
 			return "", err
 		}
+		
+		hasReceivedData = true
 		responseBuffer.Write(tmp[:n])
+		
+		// Enhanced debugging of received data
+		fmt.Printf("Received %d bytes (hex): %s\n", n, hex.EncodeToString(tmp[:n]))
+		
+		// Try to display as readable text, but safely handle binary data
+		var readable string
+		for _, b := range tmp[:n] {
+			if b >= 32 && b <= 126 { // Printable ASCII
+				readable += string(b)
+			} else {
+				readable += fmt.Sprintf("\\x%02x", b)
+			}
+		}
+		fmt.Printf("Received %d bytes (human-readable): %s\n", n, readable)
 	}
-	return responseBuffer.String(), nil
+	
+	if !hasReceivedData {
+		fmt.Println("No data received from scanner during timeout period")
+	}
+	
+	result := responseBuffer.String()
+	fmt.Println("===== COMPLETE RESPONSE =====")
+	fmt.Printf("Raw response (hex): %s\n", hex.EncodeToString(responseBuffer.Bytes()))
+	fmt.Printf("Raw response (string): %q\n", result)
+	fmt.Println("===== END RESPONSE =====")
+	
+	return result, nil
 }
 
 func writeJSONError(w http.ResponseWriter, status int, err error) {
@@ -249,24 +299,62 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string, scannerPort string) {
-	command := "<TXPING>"  // Remove the scanner port parameter
+func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string, scannerPort string, useSimpleCommand bool, useMacSettings bool) {
+	var command string
+	if useSimpleCommand {
+		command = "<TXPING>"
+		fmt.Println("Using simple command format: <TXPING>")
+	} else {
+		command = fmt.Sprintf("<TXPING,%s>", scannerPort)
+		fmt.Printf("Using port-specific command format: <TXPING,%s>\n", scannerPort)
+	}
+	
 	fmt.Printf("Sending command: %s via port: %s\n", command, portOverride)
-	result, err := sendScannerCommand(command, portOverride)
+	result, err := sendScannerCommand(command, portOverride, useMacSettings)
 
 	if err != nil {
+		fmt.Printf("Error: %v\n", err)
 		writeJSONError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if strings.TrimSpace(result) == string(byte(0x15)) {
-		writeJSONError(w, http.StatusNotFound, errors.New("no license scanned"))
+	
+	// Check for NAK (0x15) or if the response is empty
+	if strings.TrimSpace(result) == string(byte(0x15)) || strings.TrimSpace(result) == "" {
+		if strings.TrimSpace(result) == "" {
+			writeJSONError(w, http.StatusNotFound, errors.New("empty response from scanner"))
+		} else {
+			writeJSONError(w, http.StatusNotFound, errors.New("no license scanned (NAK received)"))
+		}
 		return
 	}
 
 	licenseData := parseLicenseData(result)
+	
+	// Check if all fields are empty (except licenseClass which defaults to "NA")
+	allFieldsEmpty := licenseData.FirstName == "" && 
+		licenseData.LastName == "" && 
+		licenseData.Address == "" && 
+		licenseData.City == "" && 
+		licenseData.LicenseNumber == ""
+	
+	if allFieldsEmpty {
+		// Include the raw data for debugging
+		resp := map[string]interface{}{
+			"status":        "warning",
+			"message":       "Received data but no license fields were populated",
+			"licenseData":   licenseData,
+			"rawResponse":   result,
+			"rawResponseHex": hex.EncodeToString([]byte(result)),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
 	resp := map[string]interface{}{
 		"status":      "success",
 		"licenseData": licenseData,
+		"rawData":     result, // Include raw data in the response
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -276,14 +364,17 @@ func main() {
 	scannerPortFlag := flag.String("scanner-port", "CON3", "Scanner port (e.g., CON3, CON4)")
 	portFlag := flag.String("port", "COM4", "Serial port to connect to (e.g., COM1, /dev/ttyUSB0)")
 	httpPortFlag := flag.Int("http-port", 3500, "HTTP server port")
+	useSimpleCommandFlag := flag.Bool("simple-command", false, "Use simple command format without port parameter")
+	useMacSettingsFlag := flag.Bool("mac-settings", false, "Use Mac serial port settings (9600 baud, 8 data bits)")
 	flag.Parse()
 	
 	fmt.Printf("Starting with scanner port: %s, serial port: %s, HTTP port: %d\n", 
 		*scannerPortFlag, *portFlag, *httpPortFlag)
+	fmt.Printf("Simple command: %v, Mac settings: %v\n", *useSimpleCommandFlag, *useMacSettingsFlag)
 	
 	mux := http.NewServeMux()
 	mux.HandleFunc("/scanner/scan", func(w http.ResponseWriter, r *http.Request) {
-		scannerHandler(w, r, *portFlag, *scannerPortFlag)
+		scannerHandler(w, r, *portFlag, *scannerPortFlag, *useSimpleCommandFlag, *useMacSettingsFlag)
 	})
 	
 	log.Printf("Starting server on http://localhost:%d", *httpPortFlag)
