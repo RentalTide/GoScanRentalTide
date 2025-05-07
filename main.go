@@ -35,12 +35,16 @@ type LicenseData struct {
 }
 
 func parseLicenseData(raw string) LicenseData {
+	fmt.Println("Parsing license data from raw input:")
+	fmt.Println(raw)
+	
 	lines := strings.Split(raw, "\n")
 	var parsedLines []string
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed != "" {
 			parsedLines = append(parsedLines, trimmed)
+			fmt.Println("Parsed line:", trimmed)
 		}
 	}
 
@@ -51,24 +55,30 @@ func parseLicenseData(raw string) LicenseData {
 		switch {
 		case strings.HasPrefix(line, "DCS"):
 			data["lastName"] = strings.TrimSpace(line[3:])
+			fmt.Println("Found lastName:", data["lastName"])
 		case strings.HasPrefix(line, "DAC"):
 			data["firstName"] = strings.TrimSpace(line[3:])
+			fmt.Println("Found firstName:", data["firstName"])
 		case strings.HasPrefix(line, "DAD"):
 			data["middleName"] = strings.TrimSpace(line[3:])
+			fmt.Println("Found middleName:", data["middleName"])
 		case strings.HasPrefix(line, "DBA"):
 			d := strings.TrimSpace(line[3:])
 			if len(d) >= 8 {
 				data["expiryDate"] = fmt.Sprintf("%s/%s/%s", d[0:4], d[4:6], d[6:8])
+				fmt.Println("Found expiryDate:", data["expiryDate"])
 			}
 		case strings.HasPrefix(line, "DBD"):
 			d := strings.TrimSpace(line[3:])
 			if len(d) >= 8 {
 				data["issueDate"] = fmt.Sprintf("%s/%s/%s", d[0:4], d[4:6], d[6:8])
+				fmt.Println("Found issueDate:", data["issueDate"])
 			}
 		case strings.HasPrefix(line, "DBB"):
 			d := strings.TrimSpace(line[3:])
 			if len(d) >= 8 {
 				data["dob"] = fmt.Sprintf("%s/%s/%s", d[0:4], d[4:6], d[6:8])
+				fmt.Println("Found dob:", data["dob"])
 			}
 		case strings.HasPrefix(line, "DBC"):
 			s := strings.TrimSpace(line[3:])
@@ -79,22 +89,29 @@ func parseLicenseData(raw string) LicenseData {
 			} else {
 				data["sex"] = s
 			}
+			fmt.Println("Found sex:", data["sex"])
 		case strings.HasPrefix(line, "DAU"):
 			data["height"] = strings.ReplaceAll(strings.TrimSpace(line[3:]), " ", "")
+			fmt.Println("Found height:", data["height"])
 		case strings.HasPrefix(line, "DAG"):
 			data["address"] = strings.TrimSpace(line[3:])
+			fmt.Println("Found address:", data["address"])
 		case strings.HasPrefix(line, "DAI"):
 			data["city"] = strings.TrimSpace(line[3:])
+			fmt.Println("Found city:", data["city"])
 		case strings.HasPrefix(line, "DAJ"):
 			data["state"] = strings.TrimSpace(line[3:])
+			fmt.Println("Found state:", data["state"])
 		case strings.HasPrefix(line, "DAK"):
 			data["postal"] = strings.TrimSpace(line[3:])
+			fmt.Println("Found postal:", data["postal"])
 		case strings.HasPrefix(line, "DAQ"):
 			ln := strings.TrimSpace(line[3:])
 			if len(ln) == 15 {
 				ln = fmt.Sprintf("%s-%s-%s", ln[0:5], ln[5:10], ln[10:15])
 			}
 			data["licenseNumber"] = ln
+			fmt.Println("Found licenseNumber:", data["licenseNumber"])
 		}
 
 		if strings.Contains(line, "DCAG") {
@@ -102,6 +119,7 @@ func parseLicenseData(raw string) LicenseData {
 			matches := re.FindStringSubmatch(line)
 			if len(matches) > 1 {
 				licenseClass = matches[1]
+				fmt.Println("Found licenseClass:", licenseClass)
 			}
 		}
 	}
@@ -186,7 +204,7 @@ func readWithTimeout(port serial.Port, buf []byte, timeout time.Duration) (int, 
 	}
 }
 
-func sendScannerCommand(commandStr string, portOverride string, useMacSettings bool) (string, error) {
+func sendScannerCommand(commandStr string, portOverride string, useMacSettings bool, readTimeout time.Duration) (string, error) {
 	portName, err := findScannerPort(portOverride)
 	if err != nil {
 		return "", err
@@ -231,18 +249,28 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 	}
 
 	var responseBuffer bytes.Buffer
-	deadline := time.Now().Add(10 * time.Second)
+	maxWaitTime := 30 * time.Second  // Maximum overall wait time
+	deadline := time.Now().Add(maxWaitTime)
 	tmp := make([]byte, 128)
 
-	fmt.Println("Waiting for response...")
+	fmt.Printf("Waiting for response... (timeout: %v, max wait: %v)\n", 
+		readTimeout, maxWaitTime)
+	fmt.Println("PLEASE SCAN YOUR LICENSE NOW - You have 30 seconds")
+	
 	hasReceivedData := false
 
 	for time.Now().Before(deadline) {
-		n, err := readWithTimeout(port, tmp, 3*time.Second)
+		n, err := readWithTimeout(port, tmp, readTimeout)
 		if err != nil {
 			if err.Error() == "read timeout" {
-				fmt.Println("Read timeout reached")
-				break
+				// If we've received some data but hit a timeout, consider it complete
+				if hasReceivedData {
+					fmt.Println("Read timeout reached after receiving data")
+					break
+				}
+				// Otherwise keep waiting until the overall deadline
+				fmt.Println("Read timeout, still waiting for scan...")
+				continue
 			}
 			return "", err
 		}
@@ -299,7 +327,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string, scannerPort string, useSimpleCommand bool, useMacSettings bool) {
+func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string, scannerPort string, useSimpleCommand bool, useMacSettings bool, readTimeout time.Duration) {
 	var command string
 	if useSimpleCommand {
 		command = "<TXPING>"
@@ -310,7 +338,7 @@ func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string,
 	}
 	
 	fmt.Printf("Sending command: %s via port: %s\n", command, portOverride)
-	result, err := sendScannerCommand(command, portOverride, useMacSettings)
+	result, err := sendScannerCommand(command, portOverride, useMacSettings, readTimeout)
 
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -366,15 +394,18 @@ func main() {
 	httpPortFlag := flag.Int("http-port", 3500, "HTTP server port")
 	useSimpleCommandFlag := flag.Bool("simple-command", false, "Use simple command format without port parameter")
 	useMacSettingsFlag := flag.Bool("mac-settings", false, "Use Mac serial port settings (9600 baud, 8 data bits)")
+	readTimeoutFlag := flag.Int("timeout", 10, "Read timeout in seconds")
 	flag.Parse()
 	
-	fmt.Printf("Starting with scanner port: %s, serial port: %s, HTTP port: %d\n", 
-		*scannerPortFlag, *portFlag, *httpPortFlag)
+	readTimeout := time.Duration(*readTimeoutFlag) * time.Second
+	
+	fmt.Printf("Starting with scanner port: %s, serial port: %s, HTTP port: %d, read timeout: %d seconds\n", 
+		*scannerPortFlag, *portFlag, *httpPortFlag, *readTimeoutFlag)
 	fmt.Printf("Simple command: %v, Mac settings: %v\n", *useSimpleCommandFlag, *useMacSettingsFlag)
 	
 	mux := http.NewServeMux()
 	mux.HandleFunc("/scanner/scan", func(w http.ResponseWriter, r *http.Request) {
-		scannerHandler(w, r, *portFlag, *scannerPortFlag, *useSimpleCommandFlag, *useMacSettingsFlag)
+		scannerHandler(w, r, *portFlag, *scannerPortFlag, *useSimpleCommandFlag, *useMacSettingsFlag, readTimeout)
 	})
 	
 	log.Printf("Starting server on http://localhost:%d", *httpPortFlag)
