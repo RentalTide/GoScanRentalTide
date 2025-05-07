@@ -66,8 +66,133 @@ type ReceiptData struct {
 	Copies             int           `json:"copies"`
 }
 
-func parseLicenseData(raw string) LicenseData {
-	fmt.Println("Parsing license data from raw input:")
+func parseBCLicenseData(raw string) LicenseData {
+	fmt.Println("Parsing BC license data from raw input:")
+	fmt.Println(raw)
+	
+	// Initialize license data
+	license := LicenseData{
+		RawData: raw,
+	}
+	
+	// First, clean up the data
+	raw = strings.ReplaceAll(raw, "\r", "")
+	raw = strings.ReplaceAll(raw, "\n", "")
+	
+	// Split by carets (^)
+	parts := strings.Split(raw, "^")
+	
+	// Extract info based on BC driver's license format
+	if len(parts) >= 3 {
+		// First part contains jurisdiction and city
+		if strings.HasPrefix(parts[0], "%BC") {
+			// Extract city
+			cityPart := strings.TrimPrefix(parts[0], "%BC")
+			license.City = strings.TrimSpace(cityPart)
+			fmt.Println("Found city:", license.City)
+		}
+		
+		// Second part contains last name and first name
+		if len(parts) > 1 {
+			nameParts := strings.Split(parts[1], ",")
+			if len(nameParts) >= 2 {
+				// Last name is before the comma
+				license.LastName = strings.TrimSpace(strings.TrimPrefix(nameParts[0], "$"))
+				fmt.Println("Found lastName:", license.LastName)
+				
+				// First name and possibly middle name after the comma
+				fullFirstName := strings.TrimSpace(nameParts[1])
+				// Check for middle name
+				firstNameParts := strings.Split(fullFirstName, " ")
+				if len(firstNameParts) > 1 {
+					license.FirstName = firstNameParts[0]
+					license.MiddleName = strings.Join(firstNameParts[1:], " ")
+				} else {
+					license.FirstName = fullFirstName
+				}
+				fmt.Println("Found firstName:", license.FirstName)
+				fmt.Println("Found middleName:", license.MiddleName)
+			}
+		}
+		
+		// Third part contains address
+		if len(parts) > 2 {
+			addressParts := strings.Split(parts[2], "$")
+			if len(addressParts) >= 1 {
+				license.Address = strings.TrimSpace(addressParts[0])
+				fmt.Println("Found address:", license.Address)
+			}
+			
+			// State and postal code might be in the next part
+			if len(parts) > 3 {
+				// Check if there's a $ character to indicate province info
+				if strings.Contains(parts[3], "$") {
+					stateParts := strings.Split(parts[3], "$")
+					if len(stateParts) >= 2 {
+						addrParts := strings.Fields(stateParts[1])
+						if len(addrParts) >= 2 {
+							license.State = strings.TrimSpace(addrParts[0])
+							fmt.Println("Found state:", license.State)
+							
+							// Postal code is usually the last part
+							license.Postal = strings.Join(addrParts[1:], " ")
+							fmt.Println("Found postal:", license.Postal)
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	// Extract license number - usually after the = sign
+	licenseNumberMatch := regexp.MustCompile(`;([0-9]+)=`).FindStringSubmatch(raw)
+	if len(licenseNumberMatch) > 1 {
+		license.LicenseNumber = licenseNumberMatch[1]
+		fmt.Println("Found licenseNumber:", license.LicenseNumber)
+	}
+	
+	// Extract birth date - usually in format YYYYMMDD after the license number
+	dobMatch := regexp.MustCompile(`=([0-9]{8})`).FindStringSubmatch(raw)
+	if len(dobMatch) > 1 {
+		dob := dobMatch[1]
+		if len(dob) == 8 {
+			license.Dob = fmt.Sprintf("%s/%s/%s", dob[0:4], dob[4:6], dob[6:8])
+			fmt.Println("Found dob:", license.Dob)
+		}
+	}
+	
+	// Extract expiry date - usually second date field
+	expiryMatch := regexp.MustCompile(`=\d{8}(\d{8})`).FindStringSubmatch(raw)
+	if len(expiryMatch) > 1 {
+		expiry := expiryMatch[1]
+		if len(expiry) == 8 {
+			license.ExpiryDate = fmt.Sprintf("%s/%s/%s", expiry[0:4], expiry[4:6], expiry[6:8])
+			fmt.Println("Found expiryDate:", license.ExpiryDate)
+		}
+	}
+
+	// Extract sex from M/F indicator
+	if strings.Contains(raw, " M") {
+		license.Sex = "M"
+		fmt.Println("Found sex: M")
+	} else if strings.Contains(raw, " F") {
+		license.Sex = "F"
+		fmt.Println("Found sex: F")
+	}
+	
+	// Extract height - usually in format like "165" (in cm)
+	heightMatch := regexp.MustCompile(`M(\d{3})`).FindStringSubmatch(raw)
+	if len(heightMatch) > 1 {
+		license.Height = heightMatch[1] + "cm"
+		fmt.Println("Found height:", license.Height)
+	}
+	
+	return license
+}
+
+// Original AAMVA format parser for other jurisdictions
+func parseAAMVALicenseData(raw string) LicenseData {
+	fmt.Println("Parsing AAMVA license data from raw input:")
 	fmt.Println(raw)
 	
 	lines := strings.Split(raw, "\n")
@@ -175,7 +300,32 @@ func parseLicenseData(raw string) LicenseData {
 		Sex:           data["sex"],
 		LicenseClass:  licenseClass,
 		Dob:           data["dob"],
-		RawData:       raw, // Include raw data for debugging
+		RawData:       raw,
+	}
+}
+
+// Main parser that determines which format to use
+func parseLicenseData(raw string) LicenseData {
+	// Determine the format of the license data
+	if strings.Contains(raw, "%BC") {
+		// This is a BC driver's license format
+		return parseBCLicenseData(raw)
+	} else if strings.Contains(raw, "ANSI ") {
+		// This is an AAMVA format license
+		return parseAAMVALicenseData(raw)
+	} else if strings.Contains(raw, "DCS") || strings.Contains(raw, "DAQ") {
+		// This is likely an AAMVA format license
+		return parseAAMVALicenseData(raw)
+	} else {
+		// Try BC format by default
+		license := parseBCLicenseData(raw)
+		
+		// If we couldn't extract basic info, try AAMVA as a fallback
+		if license.FirstName == "" && license.LastName == "" && license.LicenseNumber == "" {
+			return parseAAMVALicenseData(raw)
+		}
+		
+		return license
 	}
 }
 
