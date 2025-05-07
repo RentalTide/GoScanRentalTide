@@ -470,13 +470,13 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 	}
 
 	var responseBuffer bytes.Buffer
-	maxWaitTime := 30 * time.Second  // Maximum overall wait time
+	maxWaitTime := 15 * time.Second  // Maximum overall wait time
 	deadline := time.Now().Add(maxWaitTime)
 	tmp := make([]byte, 128)
 
 	fmt.Printf("Waiting for response... (timeout: %v, max wait: %v)\n", 
 		readTimeout, maxWaitTime)
-	fmt.Println("PLEASE SCAN YOUR LICENSE NOW - You have 30 seconds")
+	fmt.Println("PLEASE SCAN YOUR LICENSE NOW - You have 10 seconds")
 	
 	hasReceivedData := false
 
