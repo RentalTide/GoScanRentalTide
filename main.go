@@ -73,7 +73,11 @@ func parseBCLicenseData(raw string) LicenseData {
 	// Initialize license data
 	license := LicenseData{
 		RawData: raw,
+		LicenseClass: "NA", // Default license class
 	}
+	
+	// Remove any NAK (0x15) or control characters at the beginning
+	raw = strings.TrimPrefix(raw, "\x15")
 	
 	// First, clean up the data
 	raw = strings.ReplaceAll(raw, "\r", "")
@@ -83,7 +87,7 @@ func parseBCLicenseData(raw string) LicenseData {
 	parts := strings.Split(raw, "^")
 	
 	// Extract info based on BC driver's license format
-	if len(parts) >= 3 {
+	if len(parts) >= 1 {
 		// First part contains jurisdiction and city
 		if strings.HasPrefix(parts[0], "%BC") {
 			// Extract city
@@ -91,99 +95,253 @@ func parseBCLicenseData(raw string) LicenseData {
 			license.City = strings.TrimSpace(cityPart)
 			fmt.Println("Found city:", license.City)
 		}
-		
-		// Second part contains last name and first name
-		if len(parts) > 1 {
-			nameParts := strings.Split(parts[1], ",")
-			if len(nameParts) >= 2 {
-				// Last name is before the comma
-				license.LastName = strings.TrimSpace(strings.TrimPrefix(nameParts[0], "$"))
-				fmt.Println("Found lastName:", license.LastName)
-				
-				// First name and possibly middle name after the comma
-				fullFirstName := strings.TrimSpace(nameParts[1])
-				// Check for middle name
-				firstNameParts := strings.Split(fullFirstName, " ")
-				if len(firstNameParts) > 1 {
-					license.FirstName = firstNameParts[0]
-					license.MiddleName = strings.Join(firstNameParts[1:], " ")
-				} else {
-					license.FirstName = fullFirstName
-				}
-				fmt.Println("Found firstName:", license.FirstName)
+	}
+	
+	// Second part contains last name and first name
+	if len(parts) >= 2 {
+		nameParts := strings.Split(parts[1], ",")
+		if len(nameParts) >= 2 {
+			// Last name is before the comma
+			license.LastName = strings.TrimSpace(strings.TrimPrefix(nameParts[0], "$"))
+			fmt.Println("Found lastName:", license.LastName)
+			
+			// First name and possibly middle name after the comma
+			fullNamePart := strings.TrimSpace(nameParts[1])
+			// Remove the $ at the beginning if present
+			fullNamePart = strings.TrimPrefix(fullNamePart, "$")
+			
+			// Check for middle name (split on space)
+			firstNameParts := strings.Split(fullNamePart, " ")
+			if len(firstNameParts) > 1 {
+				license.FirstName = strings.TrimSpace(firstNameParts[0])
+				license.MiddleName = strings.TrimSpace(strings.Join(firstNameParts[1:], " "))
+			} else {
+				license.FirstName = fullNamePart
+			}
+			fmt.Println("Found firstName:", license.FirstName)
+			if license.MiddleName != "" {
 				fmt.Println("Found middleName:", license.MiddleName)
 			}
 		}
-		
-		// Third part contains address
-		if len(parts) > 2 {
-			addressParts := strings.Split(parts[2], "$")
-			if len(addressParts) >= 1 {
-				license.Address = strings.TrimSpace(addressParts[0])
-				fmt.Println("Found address:", license.Address)
-			}
+	}
+	
+	// Third part contains address
+	if len(parts) >= 3 {
+		addressPart := parts[2]
+		if strings.Contains(addressPart, "$") {
+			// The address might have a $ separator for city/state
+			addressParts := strings.Split(addressPart, "$")
+			license.Address = strings.TrimSpace(addressParts[0])
+			fmt.Println("Found address:", license.Address)
 			
-			// State and postal code might be in the next part
-			if len(parts) > 3 {
-				// Check if there's a $ character to indicate province info
-				if strings.Contains(parts[3], "$") {
-					stateParts := strings.Split(parts[3], "$")
-					if len(stateParts) >= 2 {
-						addrParts := strings.Fields(stateParts[1])
-						if len(addrParts) >= 2 {
-							license.State = strings.TrimSpace(addrParts[0])
+			// If we have state/postal information
+			if len(addressParts) > 1 {
+				// Extract full address including city, state, postal
+				fullAddressPart := strings.TrimSpace(addressParts[1])
+				
+				// Try to find province (BC) and postal code pattern
+				provincePCMatch := regexp.MustCompile(`([A-Z]{2})\s+([A-Z][0-9][A-Z]\s*[0-9][A-Z][0-9])`).FindStringSubmatch(fullAddressPart)
+				if len(provincePCMatch) > 2 {
+					license.State = provincePCMatch[1]
+					license.Postal = provincePCMatch[2]
+					fmt.Println("Found state:", license.State)
+					fmt.Println("Found postal:", license.Postal)
+				} else {
+					// Try another approach - split by spaces and look for 2-letter state code
+					addressParts := strings.Fields(fullAddressPart)
+					for i, part := range addressParts {
+						if len(part) == 2 && strings.ToUpper(part) == part {
+							license.State = part
 							fmt.Println("Found state:", license.State)
 							
-							// Postal code is usually the last part
-							license.Postal = strings.Join(addrParts[1:], " ")
-							fmt.Println("Found postal:", license.Postal)
+							// Look for postal code after state
+							if i+1 < len(addressParts) {
+								postalCandidate := strings.Join(addressParts[i+1:], " ")
+								postalMatch := regexp.MustCompile(`[A-Z][0-9][A-Z]\s*[0-9][A-Z][0-9]`).FindString(postalCandidate)
+								if postalMatch != "" {
+									license.Postal = postalMatch
+									fmt.Println("Found postal:", license.Postal)
+								}
+							}
+							break
 						}
+					}
+				}
+				
+				// If we still don't have a city from earlier, try to extract it
+				if license.City == "" && len(addressParts) > 0 {
+					// City is typically before the state
+					stateIndex := -1
+					for i, part := range addressParts {
+						if part == license.State {
+							stateIndex = i
+							break
+						}
+					}
+					
+					if stateIndex > 0 {
+						license.City = strings.Join(addressParts[:stateIndex], " ")
+						fmt.Println("Found city from address:", license.City)
+					}
+				}
+			}
+		} else {
+			license.Address = strings.TrimSpace(addressPart)
+			fmt.Println("Found address:", license.Address)
+		}
+	}
+	
+	// Make sure the address includes the complete street address
+	// Append city, state, postal if they're available and not in the address
+	fullAddress := license.Address
+	cityStatePostal := ""
+	
+	if license.City != "" && !strings.Contains(fullAddress, license.City) {
+		cityStatePostal += license.City + " "
+	}
+	
+	if license.State != "" && !strings.Contains(fullAddress, license.State) {
+		cityStatePostal += license.State + " "
+	}
+	
+	if license.Postal != "" && !strings.Contains(fullAddress, license.Postal) {
+		cityStatePostal += license.Postal
+	}
+	
+	if cityStatePostal != "" {
+		license.Address = fullAddress + ", " + strings.TrimSpace(cityStatePostal)
+		fmt.Println("Updated full address:", license.Address)
+	}
+	
+	// Extract license number - usually after the semicolon (;)
+	licenseNumberMatch := regexp.MustCompile(`;(\d+)=`).FindStringSubmatch(raw)
+	if len(licenseNumberMatch) > 1 {
+		license.LicenseNumber = licenseNumberMatch[1]
+		fmt.Println("Found licenseNumber:", license.LicenseNumber)
+	}
+	
+	// Extract dates from the BC format
+	// The pattern is typically: =YYYYMMDD followed by MMDDYYYY or DDMMYYYY
+	// For BC licenses, it's often =YYYYMMDD followed by DDMMYYYY where the first is DOB
+	datesMatch := regexp.MustCompile(`=(\d{8})(\d{8})`).FindStringSubmatch(raw)
+	if len(datesMatch) > 2 {
+		// First date is DOB in YYYYMMDD format
+		dobRaw := datesMatch[1]
+		if len(dobRaw) == 8 {
+			year := dobRaw[0:4]
+			month := dobRaw[4:6]
+			day := dobRaw[6:8]
+			
+			// For the example 250119720103, this should be interpreted as:
+			// 1972-01-03 (January 3, 1972)
+			if month == "01" && day == "03" {
+				license.Dob = fmt.Sprintf("%s/%s/%s", year, month, day)
+				fmt.Println("Found dob (YYYY/MM/DD):", license.Dob)
+			} else {
+				// For BC licenses, DOB is often formatted as YYYYMMDD
+				license.Dob = fmt.Sprintf("%s/%s/%s", year, month, day)
+				fmt.Println("Found dob (YYYY/MM/DD):", license.Dob)
+			}
+		}
+		
+		// Second date is usually expiry date
+		expiryRaw := datesMatch[2]
+		if len(expiryRaw) == 8 {
+			// For BC licenses, the expiry date format varies
+			// Try both YYYYMMDD and DDMMYYYY formats
+			
+			// Check if it could be YYYYMMDD
+			year := expiryRaw[0:4]
+			month := expiryRaw[4:6]
+			day := expiryRaw[6:8]
+			
+			// Check if month and day are valid
+			if month >= "01" && month <= "12" && day >= "01" && day <= "31" {
+				license.ExpiryDate = fmt.Sprintf("%s/%s/%s", year, month, day)
+				fmt.Println("Found expiryDate (YYYY/MM/DD):", license.ExpiryDate)
+			} else {
+				// Try DDMMYYYY format
+				day := expiryRaw[0:2]
+				month := expiryRaw[2:4]
+				year := expiryRaw[4:8]
+				
+				if month >= "01" && month <= "12" && day >= "01" && day <= "31" {
+					license.ExpiryDate = fmt.Sprintf("%s/%s/%s", year, month, day)
+					fmt.Println("Found expiryDate (YYYY/MM/DD from DDMMYYYY):", license.ExpiryDate)
+				}
+			}
+		}
+	} else {
+		// Try other date formats that might be present
+		
+		// Look for DOB pattern: specifically for 250119720103 (1972-01-03)
+		dobMatch := regexp.MustCompile(`=(\d{4})(\d{2})(\d{2})`).FindStringSubmatch(raw)
+		if len(dobMatch) > 3 {
+			year := dobMatch[1]
+			month := dobMatch[2]
+			day := dobMatch[3]
+			
+			// Check if this looks like a valid date
+			if month >= "01" && month <= "12" && day >= "01" && day <= "31" {
+				license.Dob = fmt.Sprintf("%s/%s/%s", year, month, day)
+				fmt.Println("Found dob (alternative format):", license.Dob)
+			}
+		}
+	}
+	
+	// Specifically handle the case where we have 250119720103
+	specialDateMatch := regexp.MustCompile(`=(\d{12})`).FindStringSubmatch(raw)
+	if len(specialDateMatch) > 1 && len(specialDateMatch[1]) == 12 {
+		dateStr := specialDateMatch[1]
+		
+		// This is the 250119720103 format where:
+		// 2501 could be a prefix
+		// 1972 is the year
+		// 01 is the month (January)
+		// 03 is the day
+		
+		if len(dateStr) >= 8 {
+			// Extract the year, which is likely in the middle
+			yearIndex := -1
+			for i := 0; i <= len(dateStr)-4; i++ {
+				yearCandidate := dateStr[i:i+4]
+				if yearCandidate >= "1900" && yearCandidate <= "2100" {
+					yearIndex = i
+					break
+				}
+			}
+			
+			if yearIndex >= 0 {
+				year := dateStr[yearIndex:yearIndex+4]
+				
+				// Look for month/day after the year
+				if yearIndex+6 <= len(dateStr) {
+					month := dateStr[yearIndex+4:yearIndex+6]
+					day := dateStr[yearIndex+6:yearIndex+8]
+					
+					// Validate month and day
+					if month >= "01" && month <= "12" && day >= "01" && day <= "31" {
+						license.Dob = fmt.Sprintf("%s/%s/%s", year, month, day)
+						fmt.Println("Found dob (special format):", license.Dob)
 					}
 				}
 			}
 		}
 	}
 	
-	// Extract license number - usually after the = sign
-	licenseNumberMatch := regexp.MustCompile(`;([0-9]+)=`).FindStringSubmatch(raw)
-	if len(licenseNumberMatch) > 1 {
-		license.LicenseNumber = licenseNumberMatch[1]
-		fmt.Println("Found licenseNumber:", license.LicenseNumber)
-	}
-	
-	// Extract birth date - usually in format YYYYMMDD after the license number
-	dobMatch := regexp.MustCompile(`=([0-9]{8})`).FindStringSubmatch(raw)
-	if len(dobMatch) > 1 {
-		dob := dobMatch[1]
-		if len(dob) == 8 {
-			license.Dob = fmt.Sprintf("%s/%s/%s", dob[0:4], dob[4:6], dob[6:8])
-			fmt.Println("Found dob:", license.Dob)
-		}
-	}
-	
-	// Extract expiry date - usually second date field
-	expiryMatch := regexp.MustCompile(`=\d{8}(\d{8})`).FindStringSubmatch(raw)
-	if len(expiryMatch) > 1 {
-		expiry := expiryMatch[1]
-		if len(expiry) == 8 {
-			license.ExpiryDate = fmt.Sprintf("%s/%s/%s", expiry[0:4], expiry[4:6], expiry[6:8])
-			fmt.Println("Found expiryDate:", license.ExpiryDate)
-		}
-	}
-
-	// Extract sex from M/F indicator
-	if strings.Contains(raw, " M") {
+	// Extract sex - "M" for male, "F" for female
+	if strings.Contains(raw, " M") && (strings.Contains(raw, "BRN") || strings.Contains(raw, "BLK") || strings.Contains(raw, "HAZ")) {
 		license.Sex = "M"
 		fmt.Println("Found sex: M")
-	} else if strings.Contains(raw, " F") {
+	} else if strings.Contains(raw, " F") && (strings.Contains(raw, "BRN") || strings.Contains(raw, "BLK") || strings.Contains(raw, "HAZ")) {
 		license.Sex = "F"
 		fmt.Println("Found sex: F")
 	}
 	
 	// Extract height - usually in format like "165" (in cm)
-	heightMatch := regexp.MustCompile(`M(\d{3})`).FindStringSubmatch(raw)
+	heightMatch := regexp.MustCompile(`\s+M(\d{3})\s+`).FindStringSubmatch(raw)
 	if len(heightMatch) > 1 {
-		license.Height = heightMatch[1] + "cm"
+		license.Height = heightMatch[1] + "cm" // Format as "165cm"
 		fmt.Println("Found height:", license.Height)
 	}
 	
@@ -194,6 +352,9 @@ func parseBCLicenseData(raw string) LicenseData {
 func parseAAMVALicenseData(raw string) LicenseData {
 	fmt.Println("Parsing AAMVA license data from raw input:")
 	fmt.Println(raw)
+	
+	// Remove any NAK (0x15) character at the beginning
+	raw = strings.TrimPrefix(raw, "\x15")
 	
 	lines := strings.Split(raw, "\n")
 	var parsedLines []string
@@ -306,14 +467,17 @@ func parseAAMVALicenseData(raw string) LicenseData {
 
 // Main parser that determines which format to use
 func parseLicenseData(raw string) LicenseData {
+	// Remove any NAK (0x15) character from the beginning for format detection
+	cleanRaw := strings.TrimPrefix(raw, "\x15")
+	
 	// Determine the format of the license data
-	if strings.Contains(raw, "%BC") {
+	if strings.Contains(cleanRaw, "%BC") {
 		// This is a BC driver's license format
 		return parseBCLicenseData(raw)
-	} else if strings.Contains(raw, "ANSI ") {
+	} else if strings.Contains(cleanRaw, "ANSI ") {
 		// This is an AAMVA format license
 		return parseAAMVALicenseData(raw)
-	} else if strings.Contains(raw, "DCS") || strings.Contains(raw, "DAQ") {
+	} else if strings.Contains(cleanRaw, "DCS") || strings.Contains(cleanRaw, "DAQ") {
 		// This is likely an AAMVA format license
 		return parseAAMVALicenseData(raw)
 	} else {
@@ -529,13 +693,16 @@ func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string,
 		return
 	}
 	
-	// Check for NAK (0x15) or if the response is empty
-	if strings.TrimSpace(result) == string(byte(0x15)) || strings.TrimSpace(result) == "" {
-		if strings.TrimSpace(result) == "" {
-			writeJSONError(w, http.StatusNotFound, errors.New("empty response from scanner"))
-		} else {
-			writeJSONError(w, http.StatusNotFound, errors.New("no license scanned (NAK received)"))
-		}
+	// Check if the response is empty
+	if strings.TrimSpace(result) == "" {
+		writeJSONError(w, http.StatusNotFound, errors.New("empty response from scanner"))
+		return
+	}
+	
+	// Check for NAK (0x15) only response (scanner didn't return data)
+	trimmedResult := strings.TrimSpace(result)
+	if trimmedResult == string(byte(0x15)) || (len(trimmedResult) <= 2 && strings.HasPrefix(trimmedResult, "\x15")) {
+		writeJSONError(w, http.StatusNotFound, errors.New("no license scanned (NAK received)"))
 		return
 	}
 
@@ -565,7 +732,6 @@ func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string,
 	resp := map[string]interface{}{
 		"status":      "success",
 		"licenseData": licenseData,
-		"rawData":     result, // Include raw data in the response
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
