@@ -250,7 +250,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 }
 
 func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string, scannerPort string) {
-	command := fmt.Sprintf("<TXPING,%s>", scannerPort)
+	command := "<TXPING>"  // Remove the scanner port parameter
 	fmt.Printf("Sending command: %s via port: %s\n", command, portOverride)
 	result, err := sendScannerCommand(command, portOverride)
 
