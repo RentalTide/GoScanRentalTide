@@ -180,8 +180,8 @@ func sendScannerCommand(commandStr string, portOverride string) (string, error) 
 	}
 
 	mode := &serial.Mode{
-		BaudRate: 9600,
-		DataBits: 8,
+		BaudRate: 1200,     // Changed to match COM4
+		DataBits: 7,        // Changed to match COM4
 		Parity:   serial.NoParity,
 		StopBits: serial.OneStopBit,
 	}
