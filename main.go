@@ -129,6 +129,7 @@ func parseLicenseData(raw string) LicenseData {
 func findScannerPort(portOverride string) (string, error) {
 	// If a port is explicitly provided, use that
 	if portOverride != "" {
+		fmt.Println("Using specified port override:", portOverride)
 		return portOverride, nil
 	}
 
@@ -140,10 +141,19 @@ func findScannerPort(portOverride string) (string, error) {
 		return "", errors.New("no serial ports found")
 	}
 
-	fmt.Println("Available ports:", ports) // Add this line for debugging
+	fmt.Println("Available ports:", ports)
 
+	// First, look specifically for COM4
 	for _, port := range ports {
-		fmt.Println("Checking port:", port) // More debugging
+		if strings.ToUpper(port) == "COM4" {
+			fmt.Println("Found preferred port COM4")
+			return port, nil
+		}
+	}
+	
+	// If COM4 not found, fall back to first COM port
+	for _, port := range ports {
+		fmt.Println("Checking port:", port)
 		if runtime.GOOS == "windows" && strings.HasPrefix(strings.ToLower(port), "com") {
 			return port, nil
 		} else if runtime.GOOS == "darwin" && strings.Contains(strings.ToLower(port), "usbserial") {
@@ -179,12 +189,17 @@ func sendScannerCommand(commandStr string, portOverride string) (string, error) 
 		return "", err
 	}
 
+	// Use settings that match COM4
 	mode := &serial.Mode{
-		BaudRate: 1200,     // Changed to match COM4
-		DataBits: 7,        // Changed to match COM4
+		BaudRate: 1200,    // Changed to match COM4
+		DataBits: 7,       // Changed to match COM4
 		Parity:   serial.NoParity,
 		StopBits: serial.OneStopBit,
 	}
+	
+	fmt.Printf("Opening port %s with settings: BaudRate=%d, DataBits=%d\n", 
+		portName, mode.BaudRate, mode.DataBits)
+	
 	port, err := serial.Open(portName, mode)
 	if err != nil {
 		return "", fmt.Errorf("open port %s failed: %w", portName, err)
@@ -236,6 +251,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string, scannerPort string) {
 	command := fmt.Sprintf("<TXPING,%s>", scannerPort)
+	fmt.Printf("Sending command: %s via port: %s\n", command, portOverride)
 	result, err := sendScannerCommand(command, portOverride)
 
 	if err != nil {
@@ -258,9 +274,12 @@ func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string,
 
 func main() {
 	scannerPortFlag := flag.String("scanner-port", "CON3", "Scanner port (e.g., CON3, CON4)")
-	portFlag := flag.String("port", "", "Serial port to connect to (e.g., COM1, /dev/ttyUSB0)")
+	portFlag := flag.String("port", "COM4", "Serial port to connect to (e.g., COM1, /dev/ttyUSB0)")
 	httpPortFlag := flag.Int("http-port", 3500, "HTTP server port")
 	flag.Parse()
+	
+	fmt.Printf("Starting with scanner port: %s, serial port: %s, HTTP port: %d\n", 
+		*scannerPortFlag, *portFlag, *httpPortFlag)
 	
 	mux := http.NewServeMux()
 	mux.HandleFunc("/scanner/scan", func(w http.ResponseWriter, r *http.Request) {
