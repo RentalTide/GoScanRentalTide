@@ -64,10 +64,9 @@ type ReceiptData struct {
 	CashGiven          float64       `json:"cashGiven,omitempty"`
 	ChangeDue          float64       `json:"changeDue,omitempty"`
 	Copies             int           `json:"copies"`
+	Type               string        `json:"type,omitempty"`      // Added for 'noSale' type
+	Timestamp          string        `json:"timestamp,omitempty"` // Added for timestamp
 }
-
-// The only change needed is to modify the parseBCLicenseData function to not
-// combine the address fields. Here's the relevant part to replace:
 
 func parseBCLicenseData(raw string) LicenseData {
 	fmt.Println("Parsing BC license data from raw input:")
@@ -347,6 +346,9 @@ func parseLicenseData(raw string) LicenseData {
 	if strings.Contains(cleanRaw, "%BC") {
 		// This is a BC driver's license format
 		return parseBCLicenseData(raw)
+	} else if strings.Contains(cleanRaw, "%AB") {
+		// This is an Alberta driver's license (also uses BC format parser)
+		return parseBCLicenseData(raw)
 	} else if strings.Contains(cleanRaw, "ANSI ") {
 		// This is an AAMVA format license
 		return parseAAMVALicenseData(raw)
@@ -620,6 +622,46 @@ func generateESCPOSCommands(receipt ReceiptData) ([]byte, error) {
 	// Center align
 	cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1
 	
+	// Handle the special case for "No Sale" receipt
+	if receipt.Type == "noSale" {
+		// Set bold text
+		cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
+		cmd.WriteString("NO SALE\n\n")
+		cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
+		
+		// Add timestamp
+		if receipt.Timestamp != "" {
+			cmd.WriteString(receipt.Timestamp + "\n\n")
+		} else {
+			// Use current time if no timestamp provided
+			currentTime := time.Now().Format("2006-01-02 15:04:05")
+			cmd.WriteString(currentTime + "\n\n")
+		}
+		
+		// Add location if available
+		if receipt.Location != nil {
+			var locationName string
+			switch loc := receipt.Location.(type) {
+			case string:
+				locationName = loc
+			case map[string]interface{}:
+				if name, ok := loc["name"].(string); ok {
+					locationName = name
+				}
+			}
+			
+			if locationName != "" && locationName != "noSale" {
+				cmd.WriteString(locationName + "\n")
+			}
+		}
+		
+		// Extra space and cut paper
+		cmd.WriteString("\n\n\n")
+		cmd.Write([]byte{0x1D, 0x56, 0x41, 0x10}) // GS V A 16 (partial cut with feed)
+		
+		return cmd.Bytes(), nil
+	}
+	
 	// Get location name
 	var locationName string
 	switch loc := receipt.Location.(type) {
@@ -747,8 +789,8 @@ func printReceiptHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	// Validate receipt
-	if receipt.TransactionID == "" {
+	// Validate receipt - skip validation for 'noSale' type
+	if receipt.Type != "noSale" && receipt.TransactionID == "" {
 		writeJSONError(w, http.StatusBadRequest, errors.New("transaction ID is required"))
 		return
 	}
@@ -791,18 +833,17 @@ func printReceiptHandler(w http.ResponseWriter, r *http.Request) {
 	successCount := 0
 	for i := 0; i < receipt.Copies; i++ {
 		if runtime.GOOS == "windows" {
-			// Windows: use PowerShell to send to a specific printer
+			// Windows: use PowerShell to send to a specific printer (Receipt1)
 			cmd = exec.Command("powershell", "-Command", fmt.Sprintf("Get-Content -Path '%s' -Raw | Out-Printer -Name 'Receipt1'", tempFile.Name()))
 			fmt.Printf("Printing copy %d/%d using Receipt1 printer\n", i+1, receipt.Copies)
-
 		} else if runtime.GOOS == "darwin" {
-			// macOS: use lp command with default printer
-			cmd = exec.Command("lp", tempFile.Name())
-			fmt.Printf("Printing copy %d/%d using default macOS printer\n", i+1, receipt.Copies)
+			// macOS: use lp command with specific printer
+			cmd = exec.Command("lp", "-d", "Receipt1", tempFile.Name())
+			fmt.Printf("Printing copy %d/%d using Receipt1 printer\n", i+1, receipt.Copies)
 		} else {
-			// Linux: use lp command with default printer
-			cmd = exec.Command("lp", tempFile.Name())
-			fmt.Printf("Printing copy %d/%d using default Linux printer\n", i+1, receipt.Copies)
+			// Linux: use lp command with specific printer
+			cmd = exec.Command("lp", "-d", "Receipt1", tempFile.Name())
+			fmt.Printf("Printing copy %d/%d using Receipt1 printer\n", i+1, receipt.Copies)
 		}
 		
 		// Execute the command
@@ -835,6 +876,7 @@ func main() {
 	useSimpleCommandFlag := flag.Bool("simple-command", true, "Use simple command format without port parameter")
 	useMacSettingsFlag := flag.Bool("mac-settings", true, "Use Mac serial port settings (9600 baud, 8 data bits)")
 	readTimeoutFlag := flag.Int("timeout", 10, "Read timeout in seconds")
+	printerNameFlag := flag.String("printer", "Receipt1", "Printer name (default: Receipt1)")
 	flag.Parse()
 	
 	readTimeout := time.Duration(*readTimeoutFlag) * time.Second
@@ -842,6 +884,7 @@ func main() {
 	fmt.Printf("Starting with scanner port: %s, serial port: %s, HTTP port: %d, read timeout: %d seconds\n", 
 		*scannerPortFlag, *portFlag, *httpPortFlag, *readTimeoutFlag)
 	fmt.Printf("Simple command: %v, Mac settings: %v\n", *useSimpleCommandFlag, *useMacSettingsFlag)
+	fmt.Printf("Using printer: %s\n", *printerNameFlag)
 	
 	mux := http.NewServeMux()
 	
