@@ -178,34 +178,43 @@ func parseBCLicenseData(raw string) LicenseData {
 	}
 	
 	// Extract birth date from the BC license format
-	// Looking at the raw data "=271220051212=" and the known DOB of 2005/12/12,
-	// the format appears to be DDMMYYYYYYMMDD:
-	// - 271220: License expiry date (27/12/20)
-	// - 051212: Birth date in YYMMDD format (05/12/12)
+	// Based on your clarification, the format after "=" is:
+	// DDMMYY (expiry) followed by YYMMDD (birth date)
+	// Example: "271220051212" where:
+	// - 271220: License expiry date (Dec 27, 2020)
+	// - 051212: Birth date (Dec 12, 2005)
 	dobMatch := regexp.MustCompile(`=(\d{12})=`).FindStringSubmatch(raw)
 	if len(dobMatch) > 1 && len(dobMatch[1]) == 12 {
 		dateStr := dobMatch[1]
 		
-		// Extract the birth date portion (last 6 digits)
-		birthDatePart := dateStr[6:12]
+		// First 6 digits are expiry date (not used currently)
+		// expiryDay := dateStr[0:2]
+		// expiryMonth := dateStr[2:4]
+		// expiryYear := dateStr[4:6]
 		
-		// Format for birth date is YYMMDD
-		year := birthDatePart[0:2]
-		month := birthDatePart[2:4]
-		day := birthDatePart[4:6]
+		// Last 6 digits are birth date (YYMMDD)
+		birthYear := dateStr[6:8]
+		birthMonth := dateStr[8:10]
+		birthDay := dateStr[10:12]
 		
-		// Add century - if year > current year's last 2 digits, assume 1900s, otherwise 2000s
+		// Add century for birth year
+		var fullBirthYear string
+		birthYearNum, _ := strconv.Atoi(birthYear)
 		currentYear := time.Now().Year() % 100
-		var fullYear string
-		yearNum, _ := strconv.Atoi(year)
-		if yearNum > currentYear {
-			fullYear = "19" + year
+		if birthYearNum > currentYear {
+			fullBirthYear = "19" + birthYear
 		} else {
-			fullYear = "20" + year
+			fullBirthYear = "20" + birthYear
 		}
 		
-		license.Dob = fmt.Sprintf("%s/%s/%s", fullYear, month, day)
+		// Format birth date as YYYY/MM/DD
+		license.Dob = fmt.Sprintf("%s/%s/%s", fullBirthYear, birthMonth, birthDay)
 		fmt.Println("Found birth date:", license.Dob)
+		
+		// If needed, store expiry date too
+		// fullExpiryYear := "20" + expiryYear
+		// license.ExpiryDate = fmt.Sprintf("%s/%s/%s", fullExpiryYear, expiryMonth, expiryDay)
+		// fmt.Println("Found expiry date:", license.ExpiryDate)
 	}
 	
 	// Extract sex
