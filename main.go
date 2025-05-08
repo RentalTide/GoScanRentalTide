@@ -178,8 +178,10 @@ func parseBCLicenseData(raw string) LicenseData {
 	}
 	
 	// Extract birth date from the BC license format
-	// From the example "=271220051212=", looking at the actual DOB of 2005/12/12, the format is:
-	// DDMMYYMMDDYY - Where first DDMMYY is expiry date, and MMDDYY is birth date
+	// Looking at the raw data "=271220051212=" and the known DOB of 2005/12/12,
+	// the format appears to be DDMMYYYYYYMMDD:
+	// - 271220: License expiry date (27/12/20)
+	// - 051212: Birth date in YYMMDD format (05/12/12)
 	dobMatch := regexp.MustCompile(`=(\d{12})=`).FindStringSubmatch(raw)
 	if len(dobMatch) > 1 && len(dobMatch[1]) == 12 {
 		dateStr := dobMatch[1]
@@ -187,10 +189,10 @@ func parseBCLicenseData(raw string) LicenseData {
 		// Extract the birth date portion (last 6 digits)
 		birthDatePart := dateStr[6:12]
 		
-		// Format for birth date is MMDDYY
-		month := birthDatePart[0:2]
-		day := birthDatePart[2:4]
-		year := birthDatePart[4:6]
+		// Format for birth date is YYMMDD
+		year := birthDatePart[0:2]
+		month := birthDatePart[2:4]
+		day := birthDatePart[4:6]
 		
 		// Add century - if year > current year's last 2 digits, assume 1900s, otherwise 2000s
 		currentYear := time.Now().Year() % 100
