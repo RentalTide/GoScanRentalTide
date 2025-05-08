@@ -161,24 +161,36 @@ func parseBCLicenseData(raw string) LicenseData {
 	}
 	
 	// Extract license number - usually after the semicolon (;)
+	// Based on the example, the license number is "02356646" (without the prefix)
 	licenseNumberMatch := regexp.MustCompile(`;(\d+)=`).FindStringSubmatch(raw)
 	if len(licenseNumberMatch) > 1 {
-		license.LicenseNumber = licenseNumberMatch[1]
+		// Extract the full number
+		fullNumber := licenseNumberMatch[1]
+		
+		// For BC licenses, the actual license number is the last 8 digits
+		if len(fullNumber) > 8 {
+			license.LicenseNumber = fullNumber[len(fullNumber)-8:]
+		} else {
+			license.LicenseNumber = fullNumber
+		}
+		
 		fmt.Println("Found licenseNumber:", license.LicenseNumber)
 	}
 	
 	// Extract birth date from the BC license format
-	// Looking at the example "=271220051212=", it appears the format is:
-	// First part: DDMMYY representing expiry date
-	// Second part: DDMMYY representing birth date
-	dobMatch := regexp.MustCompile(`=(\d{6})(\d{6})=`).FindStringSubmatch(raw)
-	if len(dobMatch) > 2 && len(dobMatch[2]) == 6 {
-		dateStr := dobMatch[2] // Use the second capture group for birth date
+	// From the example "=271220051212=", looking at the actual DOB of 2005/12/12, the format is:
+	// DDMMYYMMDDYY - Where first DDMMYY is expiry date, and MMDDYY is birth date
+	dobMatch := regexp.MustCompile(`=(\d{12})=`).FindStringSubmatch(raw)
+	if len(dobMatch) > 1 && len(dobMatch[1]) == 12 {
+		dateStr := dobMatch[1]
 		
-		// Format is DDMMYY
-		day := dateStr[0:2]
-		month := dateStr[2:4]
-		year := dateStr[4:6]
+		// Extract the birth date portion (last 6 digits)
+		birthDatePart := dateStr[6:12]
+		
+		// Format for birth date is MMDDYY
+		month := birthDatePart[0:2]
+		day := birthDatePart[2:4]
+		year := birthDatePart[4:6]
 		
 		// Add century - if year > current year's last 2 digits, assume 1900s, otherwise 2000s
 		currentYear := time.Now().Year() % 100
@@ -470,7 +482,7 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 	}
 
 	var responseBuffer bytes.Buffer
-	maxWaitTime := 5 * time.Second  // Maximum overall wait time
+	maxWaitTime := 15 * time.Second  // Maximum overall wait time
 	deadline := time.Now().Add(maxWaitTime)
 	tmp := make([]byte, 128)
 
