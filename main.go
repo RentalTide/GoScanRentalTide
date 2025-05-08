@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 	"flag"
@@ -166,18 +167,30 @@ func parseBCLicenseData(raw string) LicenseData {
 		fmt.Println("Found licenseNumber:", license.LicenseNumber)
 	}
 	
-	// Extract birth date from format like 271220
-	// This assumes YYMMDD format
-	dobMatch := regexp.MustCompile(`=(\d{6})\d+`).FindStringSubmatch(raw)
-	if len(dobMatch) > 1 && len(dobMatch[1]) == 6 {
-		dateStr := dobMatch[1]
+	// Extract birth date from the BC license format
+	// Looking at the example "=271220051212=", it appears the format is:
+	// First part: DDMMYY representing expiry date
+	// Second part: DDMMYY representing birth date
+	dobMatch := regexp.MustCompile(`=(\d{6})(\d{6})=`).FindStringSubmatch(raw)
+	if len(dobMatch) > 2 && len(dobMatch[2]) == 6 {
+		dateStr := dobMatch[2] // Use the second capture group for birth date
 		
-		// Format as YYYY/MM/DD, assuming 2000s for the year
-		year := "20" + dateStr[:2]  // First 2 digits are year
-		month := dateStr[2:4]      // Next 2 are month
-		day := dateStr[4:6]        // Last 2 are day
+		// Format is DDMMYY
+		day := dateStr[0:2]
+		month := dateStr[2:4]
+		year := dateStr[4:6]
 		
-		license.Dob = fmt.Sprintf("%s/%s/%s", year, month, day)
+		// Add century - if year > current year's last 2 digits, assume 1900s, otherwise 2000s
+		currentYear := time.Now().Year() % 100
+		var fullYear string
+		yearNum, _ := strconv.Atoi(year)
+		if yearNum > currentYear {
+			fullYear = "19" + year
+		} else {
+			fullYear = "20" + year
+		}
+		
+		license.Dob = fmt.Sprintf("%s/%s/%s", fullYear, month, day)
 		fmt.Println("Found birth date:", license.Dob)
 	}
 	
@@ -457,7 +470,7 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 	}
 
 	var responseBuffer bytes.Buffer
-	maxWaitTime := 15 * time.Second  // Maximum overall wait time
+	maxWaitTime := 5 * time.Second  // Maximum overall wait time
 	deadline := time.Now().Add(maxWaitTime)
 	tmp := make([]byte, 128)
 
