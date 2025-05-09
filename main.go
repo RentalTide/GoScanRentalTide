@@ -640,10 +640,13 @@ func generateESCPOSCommands(receipt ReceiptData) ([]byte, error) {
 	var cmd bytes.Buffer
 	
 	// Initialize printer
-	cmd.Write([]byte{0x1B, 0x40}) // ESC @
+	cmd.Write([]byte{0x1B, 0x40}) // ESC @ - Initialize printer
+	
+	// Set to the largest font size
+	cmd.Write([]byte{0x1D, 0x21, 0x11}) // GS ! 17 - Double width & height
 	
 	// Center align
-	cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1
+	cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1 - Center alignment
 	
 	// Handle the special case for "No Sale" receipt
 	if receipt.Type == "noSale" {
@@ -696,9 +699,12 @@ func generateESCPOSCommands(receipt ReceiptData) ([]byte, error) {
 		}
 	}
 	
-	// Print header
+	// Print header with large font
 	cmd.WriteString(locationName + "\n")
 	cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
+	
+	// Set normal size for the rest of the receipt
+	cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
 	
 	if receipt.CustomerName != "" {
 		cmd.WriteString("Customer: " + receipt.CustomerName + "\n")
@@ -707,24 +713,34 @@ func generateESCPOSCommands(receipt ReceiptData) ([]byte, error) {
 	cmd.WriteString(receipt.Date + "\n\n")
 	
 	// Left align
-	cmd.Write([]byte{0x1B, 0x61, 0x00}) // ESC a 0
+	cmd.Write([]byte{0x1B, 0x61, 0x00}) // ESC a 0 - Left alignment
 	
 	// Print transaction info
 	cmd.WriteString("Transaction ID: " + receipt.TransactionID + "\n")
 	cmd.WriteString("Payment: " + strings.Title(receipt.PaymentType) + "\n\n")
 	
-	// Print items
+	// Print items header with larger font and bold
+	cmd.Write([]byte{0x1D, 0x21, 0x01}) // GS ! 1 - Double width
+	cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
 	cmd.WriteString("ITEMS\n")
+	cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
+	cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
+	
+	// Divider line - full width
 	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
-	cmd.WriteString("                              \n") // Underline space
+	cmd.WriteString("                                        \n") // Underline space - wider
 	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
 	
 	for _, item := range receipt.Items {
+		// Item name in bold
+		cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
 		cmd.WriteString(item.Name + "\n")
+		cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
+		
 		quantityPrice := fmt.Sprintf("%d x $%.2f", item.Quantity, item.Price)
 		// Fix: Convert int to float64 before multiplication
 		itemTotal := fmt.Sprintf("$%.2f", float64(item.Quantity)*item.Price)
-		cmd.WriteString(fmt.Sprintf("  %-20s %10s\n", quantityPrice, itemTotal))
+		cmd.WriteString(fmt.Sprintf("  %-30s %10s\n", quantityPrice, itemTotal))
 		
 		if item.SKU != "" {
 			cmd.WriteString("  SKU: " + item.SKU + "\n")
@@ -732,52 +748,59 @@ func generateESCPOSCommands(receipt ReceiptData) ([]byte, error) {
 		cmd.WriteString("\n")
 	}
 	
-	// Print divider
+	// Print divider - full width
 	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
-	cmd.WriteString("                              \n") // Underline space
+	cmd.WriteString("                                        \n") // Underline space - wider
 	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
 	
-	// Print totals
-	cmd.WriteString(fmt.Sprintf("%-20s $%.2f\n", "Subtotal:", receipt.Subtotal))
+	// Print totals with wider spacing
+	cmd.WriteString(fmt.Sprintf("%-30s $%.2f\n", "Subtotal:", receipt.Subtotal))
 	
 	if receipt.DiscountPercentage > 0 && receipt.DiscountAmount > 0 {
-		cmd.WriteString(fmt.Sprintf("%-20s -$%.2f\n", fmt.Sprintf("Discount (%.0f%%):", receipt.DiscountPercentage), receipt.DiscountAmount))
+		cmd.WriteString(fmt.Sprintf("%-30s -$%.2f\n", fmt.Sprintf("Discount (%.0f%%):", receipt.DiscountPercentage), receipt.DiscountAmount))
 	}
 	
-	cmd.WriteString(fmt.Sprintf("%-20s $%.2f\n", "Tax:", receipt.Tax))
+	cmd.WriteString(fmt.Sprintf("%-30s $%.2f\n", "Tax:", receipt.Tax))
 	
 	// Calculate GST and PST
 	gst := receipt.Subtotal * 0.05
 	pst := receipt.Subtotal * 0.07
-	cmd.WriteString(fmt.Sprintf("  GST (5%%): $%.2f\n", gst))
-	cmd.WriteString(fmt.Sprintf("  PST (7%%): $%.2f\n", pst))
+	cmd.WriteString(fmt.Sprintf("  %-28s $%.2f\n", "GST (5%):", gst))
+	cmd.WriteString(fmt.Sprintf("  %-28s $%.2f\n", "PST (7%):", pst))
 	
 	if receipt.RefundAmount > 0 {
-		cmd.WriteString(fmt.Sprintf("%-20s -$%.2f\n", "Refund:", receipt.RefundAmount))
+		cmd.WriteString(fmt.Sprintf("%-30s -$%.2f\n", "Refund:", receipt.RefundAmount))
 	}
 	
 	if receipt.Tip > 0 {
-		cmd.WriteString(fmt.Sprintf("%-20s $%.2f\n", "Tip:", receipt.Tip))
+		cmd.WriteString(fmt.Sprintf("%-30s $%.2f\n", "Tip:", receipt.Tip))
 	}
 	
-	// Print total in bold
+	// Print divider - full width
+	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
+	cmd.WriteString("                                        \n") // Underline space - wider
+	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
+	
+	// Print total in bold and larger font
+	cmd.Write([]byte{0x1D, 0x21, 0x11}) // GS ! 17 - Double width & height
 	cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
-	cmd.WriteString(fmt.Sprintf("\n%-20s $%.2f\n", "TOTAL:", receipt.Total))
+	cmd.WriteString(fmt.Sprintf("TOTAL: $%.2f\n", receipt.Total))
 	cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
+	cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
 	
 	// Print cash details if applicable
 	if receipt.PaymentType == "cash" && receipt.CashGiven > 0 {
-		cmd.WriteString(fmt.Sprintf("%-20s $%.2f\n", "Cash:", receipt.CashGiven))
-		cmd.WriteString(fmt.Sprintf("%-20s $%.2f\n", "Change:", receipt.ChangeDue))
+		cmd.WriteString(fmt.Sprintf("%-30s $%.2f\n", "Cash:", receipt.CashGiven))
+		cmd.WriteString(fmt.Sprintf("%-30s $%.2f\n", "Change:", receipt.ChangeDue))
 	}
 	
-	// Print divider
+	// Print divider - full width
 	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
-	cmd.WriteString("                              \n") // Underline space
+	cmd.WriteString("                                        \n") // Underline space - wider
 	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
 	
 	// Center align for footer
-	cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1
+	cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1 - Center alignment
 	
 	// Print footer
 	cmd.WriteString("\nThank you for your purchase!\n")
