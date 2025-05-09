@@ -655,210 +655,178 @@ func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string,
 
 // generateESCPOSCommands creates raw ESC/POS commands for thermal printers
 func generateESCPOSCommands(receipt ReceiptData) ([]byte, error) {
-	var cmd bytes.Buffer
-	
-	// Initialize printer - make sure it's in a clean state
-	cmd.Write([]byte{0x1B, 0x40}) // ESC @ - Initialize printer
-	
-	// Set character code page to PC437 (USA, Standard Europe) for consistent character rendering
-	cmd.Write([]byte{0x1B, 0x74, 0x00}) // ESC t 0
-	
-	// For 80mm printer, use appropriate font sizing
-	// Standard 80mm thermal printer can fit 42-48 characters per line at normal width
-	
-	// Center align
-	cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1 - Center alignment
-	
-	// Handle the special case for "No Sale" receipt
-	if receipt.Type == "noSale" {
-		// Set larger font for header
-		cmd.Write([]byte{0x1D, 0x21, 0x11}) // GS ! 17 - Double width & height
-		
-		// Set bold text
-		cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
-		cmd.WriteString("NO SALE\n\n")
-		cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
-		
-		// Set normal size for timestamp
-		cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
-		
-		// Add timestamp
-		if receipt.Timestamp != "" {
-			cmd.WriteString(receipt.Timestamp + "\n\n")
-		} else {
-			// Use current time if no timestamp provided
-			currentTime := time.Now().Format("2006-01-02 15:04:05")
-			cmd.WriteString(currentTime + "\n\n")
-		}
-		
-		// Add location if available
-		if receipt.Location != nil {
-			var locationName string
-			switch loc := receipt.Location.(type) {
-			case string:
-				locationName = loc
-			case map[string]interface{}:
-				if name, ok := loc["name"].(string); ok {
-					locationName = name
-				}
-			}
-			
-			if locationName != "" && locationName != "noSale" {
-				cmd.WriteString(locationName + "\n")
-			}
-		}
-		
-		// Extra space and cut paper
-		cmd.WriteString("\n\n\n")
-		cmd.Write([]byte{0x1D, 0x56, 0x41, 0x10}) // GS V A 16 (partial cut with feed)
-		
-		return cmd.Bytes(), nil
-	}
-	
-	// Get location name
-	var locationName string
-	switch loc := receipt.Location.(type) {
-	case string:
-		locationName = loc
-	case map[string]interface{}:
-		if name, ok := loc["name"].(string); ok {
-			locationName = name
-		}
-	}
-	
-	// Print header with large font
-	cmd.Write([]byte{0x1D, 0x21, 0x11}) // GS ! 17 - Double width & height
-	cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
-	cmd.WriteString(locationName + "\n")
-	cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
-	cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
-	
-	if receipt.CustomerName != "" {
-		cmd.WriteString("Customer: " + receipt.CustomerName + "\n")
-	}
-	
-	cmd.WriteString(receipt.Date + "\n\n")
-	
-	// Left align for the details
-	cmd.Write([]byte{0x1B, 0x61, 0x00}) // ESC a 0 - Left alignment
-	
-	// Check for extremely long transaction IDs and truncate if necessary
-	transactionID := receipt.TransactionID
-	if len(transactionID) > 40 {
-		// Truncate and add ellipsis
-		transactionID = transactionID[:37] + "..."
-	}
-	
-	// Print transaction info
-	cmd.WriteString("Transaction ID: " + transactionID + "\n")
-	cmd.WriteString("Payment: " + strings.Title(receipt.PaymentType) + "\n\n")
-	
-	// Print items section if there are items
-	if len(receipt.Items) > 0 {
-		// Print items header with larger font and bold
-		cmd.Write([]byte{0x1D, 0x21, 0x01}) // GS ! 1 - Double width
-		cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
-		cmd.WriteString("ITEMS\n")
-		cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
-		cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
-		
-		// Divider line - full width for 80mm (48 chars)
-		cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
-		cmd.WriteString("------------------------------------------------\n") // 48 dashes
-		cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
-		
-		for _, item := range receipt.Items {
-			// Item name in bold
-			cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
-			cmd.WriteString(item.Name + "\n")
-			cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
-			
-			// Format quantity with appropriate precision
-			var quantityStr string
-			if item.Quantity == float64(int(item.Quantity)) {
-				// If it's a whole number, display as integer
-				quantityStr = fmt.Sprintf("%d", int(item.Quantity))
-			} else {
-				// Otherwise, display with up to 3 decimal places, trimming trailing zeros
-				quantityStr = strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.3f", item.Quantity), "0"), ".")
-			}
-			
-			quantityPrice := fmt.Sprintf("%s x $%.2f", quantityStr, item.Price)
-			// Calculate total price for the item
-			itemTotal := fmt.Sprintf("$%.2f", item.Quantity*item.Price)
-			cmd.WriteString(fmt.Sprintf("  %-34s %10s\n", quantityPrice, itemTotal))
-			
-			if item.SKU != "" {
-				cmd.WriteString("  SKU: " + item.SKU + "\n")
-			}
-			cmd.WriteString("\n")
-		}
-	}
-	
-	// Divider line - full width for 80mm (48 chars)
-	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
-	cmd.WriteString("------------------------------------------------\n") // 48 dashes
-	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
-	
-	// Print totals with wider spacing for 80mm
-	cmd.WriteString(fmt.Sprintf("%-34s $%.2f\n", "Subtotal:", receipt.Subtotal))
-	
-	if receipt.DiscountPercentage > 0 && receipt.DiscountAmount > 0 {
-		cmd.WriteString(fmt.Sprintf("%-34s -$%.2f\n", fmt.Sprintf("Discount (%.0f%%):", receipt.DiscountPercentage), receipt.DiscountAmount))
-	}
-	
-	cmd.WriteString(fmt.Sprintf("%-34s $%.2f\n", "Tax:", receipt.Tax))
-	
-	// Calculate GST and PST if tax is present
-	if receipt.Tax > 0 {
-		gst := receipt.Subtotal * 0.05
-		pst := receipt.Subtotal * 0.07
-		cmd.WriteString(fmt.Sprintf("  %-32s $%.2f\n", "GST (5%):", gst))
-		cmd.WriteString(fmt.Sprintf("  %-32s $%.2f\n", "PST (7%):", pst))
-	}
-	
-	if receipt.RefundAmount > 0 {
-		cmd.WriteString(fmt.Sprintf("%-34s -$%.2f\n", "Refund:", receipt.RefundAmount))
-	}
-	
-	if receipt.Tip > 0 {
-		cmd.WriteString(fmt.Sprintf("%-34s $%.2f\n", "Tip:", receipt.Tip))
-	}
-	
-	// Divider line - full width for 80mm (48 chars)
-	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
-	cmd.WriteString("------------------------------------------------\n") // 48 dashes
-	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
-	
-	// Print total in bold and larger font
-	cmd.Write([]byte{0x1D, 0x21, 0x11}) // GS ! 17 - Double width & height
-	cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
-	cmd.WriteString(fmt.Sprintf("TOTAL: $%.2f\n", receipt.Total))
-	cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
-	cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
-	
-	// Print cash details if applicable
-	if receipt.PaymentType == "cash" && receipt.CashGiven > 0 {
-		cmd.WriteString(fmt.Sprintf("%-34s $%.2f\n", "Cash:", receipt.CashGiven))
-		cmd.WriteString(fmt.Sprintf("%-34s $%.2f\n", "Change:", receipt.ChangeDue))
-	}
-	
-	// Divider line - full width for 80mm (48 chars)
-	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
-	cmd.WriteString("------------------------------------------------\n") // 48 dashes
-	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
-	
-	// Center align for footer
-	cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1 - Center alignment
-	
-	// Print footer
-	cmd.WriteString("\nThank you for your purchase!\n")
-	cmd.WriteString("Visit us again at " + locationName + "\n\n\n")
-	
-	// Cut paper
-	cmd.Write([]byte{0x1D, 0x56, 0x41, 0x10}) // GS V A 16 (partial cut with feed)
-	
-	return cmd.Bytes(), nil
+    var cmd bytes.Buffer
+    
+    // Initialize printer
+    cmd.Write([]byte{0x1B, 0x40}) // ESC @ - Initialize printer
+    
+    // Set character size for headers (make slightly smaller)
+    cmd.Write([]byte{0x1D, 0x21, 0x01}) // GS ! 1 - Only slightly larger font
+    
+    // Center align for header
+    cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1 - Center alignment
+    
+    // Get location name
+    var locationName string
+    switch loc := receipt.Location.(type) {
+    case string:
+        locationName = loc
+    case map[string]interface{}:
+        if name, ok := loc["name"].(string); ok {
+            locationName = name
+        }
+    }
+    
+    // Print store name in bold
+    cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 - Bold on
+    cmd.WriteString(locationName + "\n")
+    cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 - Bold off
+    
+    // Set normal font size
+    cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
+    
+    // Print customer name if available
+    if receipt.CustomerName != "" {
+        cmd.WriteString("Customer: " + receipt.CustomerName + "\n")
+    }
+    
+    // Print date
+    cmd.WriteString(receipt.Date + "\n\n")
+    
+    // Left align for details
+    cmd.Write([]byte{0x1B, 0x61, 0x00}) // ESC a 0 - Left alignment
+    
+    // Use a simple line for dividers (more compatible with different printers)
+    cmd.WriteString("----------------------------------------\n")
+    
+    // Ensure the transaction ID fits properly
+    transactionID := receipt.TransactionID
+    if len(transactionID) > 35 {
+        transactionID = transactionID[:32] + "..."
+    }
+    
+    // Print transaction details
+    cmd.WriteString("Transaction: " + transactionID + "\n")
+    cmd.WriteString("Payment: " + strings.Title(receipt.PaymentType) + "\n")
+    
+    cmd.WriteString("----------------------------------------\n")
+    
+    // Print items header in bold
+    cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 - Bold on
+    cmd.WriteString("ITEMS\n")
+    cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 - Bold off
+    
+    // Print items with proper spacing (adjust column widths)
+    for _, item := range receipt.Items {
+        // Print item name (truncate if too long)
+        itemName := item.Name
+        if len(itemName) > 37 {
+            itemName = itemName[:34] + "..."
+        }
+        cmd.WriteString(itemName + "\n")
+        
+        // Format quantity correctly
+        var quantityStr string
+        if item.Quantity == float64(int(item.Quantity)) {
+            quantityStr = fmt.Sprintf("%d", int(item.Quantity))
+        } else {
+            quantityStr = strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.3f", item.Quantity), "0"), ".")
+        }
+        
+        // Format quantity and price line with proper alignment
+        // Format the spaces to right-align the price
+        quantityPrice := fmt.Sprintf("%s x $%.2f", quantityStr, item.Price)
+        itemTotal := fmt.Sprintf("$%.2f", item.Quantity*item.Price)
+        
+        // Calculate spaces needed to right-align
+        spaces := 40 - len(quantityPrice) - len(itemTotal)
+        if spaces < 1 {
+            spaces = 1
+        }
+        
+        cmd.WriteString("  " + quantityPrice + strings.Repeat(" ", spaces) + itemTotal + "\n")
+        
+        // Print SKU if available
+        if item.SKU != "" {
+            cmd.WriteString("  SKU: " + item.SKU + "\n")
+        }
+        cmd.WriteString("\n")
+    }
+    
+    cmd.WriteString("----------------------------------------\n")
+    
+    // Print totals section with better alignment
+    printTotalLine := func(label string, value float64, prefix string) {
+        if prefix == "" {
+            prefix = "$"
+        }
+        valueStr := fmt.Sprintf("%s%.2f", prefix, value)
+        spaces := 40 - len(label) - len(valueStr)
+        if spaces < 1 {
+            spaces = 1
+        }
+        cmd.WriteString(label + strings.Repeat(" ", spaces) + valueStr + "\n")
+    }
+    
+    // Print subtotal, discount, tax, etc.
+    printTotalLine("Subtotal:", receipt.Subtotal, "$")
+    
+    if receipt.DiscountPercentage > 0 && receipt.DiscountAmount > 0 {
+        discountLabel := fmt.Sprintf("Discount (%.0f%%):", receipt.DiscountPercentage)
+        printTotalLine(discountLabel, receipt.DiscountAmount, "-$")
+    }
+    
+    printTotalLine("Tax:", receipt.Tax, "$")
+    
+    // Calculate GST and PST
+    if receipt.Tax > 0 {
+        gst := receipt.Subtotal * 0.05
+        pst := receipt.Subtotal * 0.07
+        cmd.WriteString(fmt.Sprintf("  GST (5%%): $%.2f\n", gst))
+        cmd.WriteString(fmt.Sprintf("  PST (7%%): $%.2f\n", pst))
+    }
+    
+    if receipt.RefundAmount > 0 {
+        printTotalLine("Refund:", receipt.RefundAmount, "-$")
+    }
+    
+    if receipt.Tip > 0 {
+        printTotalLine("Tip:", receipt.Tip, "$")
+    }
+    
+    cmd.WriteString("----------------------------------------\n")
+    
+    // Print total in bold and slightly larger
+    cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 - Bold on
+    cmd.Write([]byte{0x1D, 0x21, 0x11}) // GS ! 17 - Double width & height
+    
+    // Center align for total
+    cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1 - Center alignment
+    cmd.WriteString(fmt.Sprintf("TOTAL: $%.2f\n", receipt.Total))
+    
+    // Reset formatting
+    cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
+    cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 - Bold off
+    cmd.Write([]byte{0x1B, 0x61, 0x00}) // ESC a 0 - Left alignment
+    
+    // Print cash details if applicable
+    if receipt.PaymentType == "cash" && receipt.CashGiven > 0 {
+        cmd.WriteString("----------------------------------------\n")
+        printTotalLine("Cash:", receipt.CashGiven, "$")
+        printTotalLine("Change:", receipt.ChangeDue, "$")
+    }
+    
+    // Center align for footer
+    cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1 - Center alignment
+    
+    // Print footer
+    cmd.WriteString("\nThank you for your purchase!\n")
+    cmd.WriteString("Visit us again at " + locationName + "\n\n\n")
+    
+    // Cut paper
+    cmd.Write([]byte{0x1D, 0x56, 0x41, 0x10}) // GS V A 16 (partial cut with feed)
+    
+    return cmd.Bytes(), nil
 }
 
 // printReceipt handles the receipt printing functionality
