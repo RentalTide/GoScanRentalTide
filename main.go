@@ -494,14 +494,16 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 
 	var responseBuffer bytes.Buffer
 	maxWaitTime := 15 * time.Second  // Maximum overall wait time
+	maxDataWaitTime := 3 * time.Second // Maximum wait time after receiving data
 	deadline := time.Now().Add(maxWaitTime)
 	tmp := make([]byte, 128)
 
-	fmt.Printf("Waiting for response... (timeout: %v, max wait: %v)\n", 
-		readTimeout, maxWaitTime)
+	fmt.Printf("Waiting for response... (timeout: %v, max wait: %v, max data wait: %v)\n", 
+		readTimeout, maxWaitTime, maxDataWaitTime)
 	fmt.Println("PLEASE SCAN YOUR LICENSE NOW - You have 10 seconds")
 	
 	hasReceivedData := false
+	firstDataTime := time.Time{}
 
 	for time.Now().Before(deadline) {
 		n, err := readWithTimeout(port, tmp, readTimeout)
@@ -509,8 +511,13 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 			if err.Error() == "read timeout" {
 				// If we've received some data but hit a timeout, consider it complete
 				if hasReceivedData {
-					fmt.Println("Read timeout reached after receiving data")
-					break
+					// Check if we've waited at least 3 seconds since first data
+					if time.Since(firstDataTime) >= maxDataWaitTime {
+						fmt.Println("Max data wait time reached")
+						break
+					}
+					fmt.Println("Read timeout after receiving data, still waiting for more data...")
+					continue
 				}
 				// Otherwise keep waiting until the overall deadline
 				fmt.Println("Read timeout, still waiting for scan...")
@@ -519,7 +526,12 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 			return "", err
 		}
 		
-		hasReceivedData = true
+		// If this is the first data we've received, record the time
+		if !hasReceivedData {
+			hasReceivedData = true
+			firstDataTime = time.Now()
+		}
+		
 		responseBuffer.Write(tmp[:n])
 		
 		// Enhanced debugging of received data
@@ -535,6 +547,12 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 			}
 		}
 		fmt.Printf("Received %d bytes (human-readable): %s\n", n, readable)
+		
+		// If we've been receiving data for more than maxDataWaitTime seconds, stop
+		if time.Since(firstDataTime) >= maxDataWaitTime {
+			fmt.Println("Max data wait time reached")
+			break
+		}
 	}
 	
 	if !hasReceivedData {
