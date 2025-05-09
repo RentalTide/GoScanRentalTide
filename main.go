@@ -1124,7 +1124,75 @@ func printReceiptHandler(w http.ResponseWriter, r *http.Request, printerName str
 	if receipt.Copies <= 0 {
 		receipt.Copies = 1
 	}
+
+	// On Windows, always use HTML with browser printing, since it looks nicer
+	if runtime.GOOS == "windows" {
+		// Generate HTML receipt
+		htmlContent, err := generateHTMLReceipt(receipt)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, errors.New("error generating HTML receipt"))
+			return
+		}
+		
+		// Create a temporary HTML file
+		htmlFile, err := ioutil.TempFile("", "receipt-*.html")
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, errors.New("error creating temporary HTML file"))
+			return
+		}
+		
+		htmlPath := htmlFile.Name()
+		defer os.Remove(htmlPath)
+		
+		// Write the HTML to the file
+		if _, err := htmlFile.WriteString(htmlContent); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, errors.New("error writing HTML file"))
+			return
+		}
+		
+		if err := htmlFile.Close(); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, errors.New("error closing HTML file"))
+			return
+		}
+		
+		// Success count for multiple copies
+		successCount := 0
+		
+		// Print each copy by opening the HTML file in the browser
+		for i := 0; i < receipt.Copies; i++ {
+			// Open the HTML file in the default browser
+			cmd := exec.Command("cmd", "/c", "start", htmlPath)
+			if err := cmd.Run(); err != nil {
+				log.Printf("Error opening browser for copy %d: %v", i+1, err)
+				continue
+			}
+			
+			// Consider successful if we opened the browser
+			successCount++
+			log.Printf("Opened receipt in browser for copy %d/%d", i+1, receipt.Copies)
+			
+			// Add a small delay between opening browser instances
+			if i < receipt.Copies-1 {
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
+		
+		// Return response
+		if successCount > 0 {
+			resp := map[string]interface{}{
+				"status":  "success",
+				"message": fmt.Sprintf("Opened %d/%d copies in browser for printing", successCount, receipt.Copies),
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+		} else {
+			writeJSONError(w, http.StatusInternalServerError, errors.New("failed to open any copies in browser"))
+		}
+		
+		return
+	}
 	
+	// For non-Windows platforms, try ESC/POS printing first
 	// Generate ESC/POS commands
 	escposData, err := generateESCPOSCommands(receipt)
 	if err != nil {
@@ -1157,11 +1225,7 @@ func printReceiptHandler(w http.ResponseWriter, r *http.Request, printerName str
 	
 	successCount := 0
 	for i := 0; i < receipt.Copies; i++ {
-		if runtime.GOOS == "windows" {
-			// Windows: use PowerShell to send to the specified printer
-			cmd = exec.Command("powershell", "-Command", fmt.Sprintf("Get-Content -Path '%s' -Raw | Out-Printer -Name '%s'", tempFile.Name(), printerName))
-			fmt.Printf("Printing copy %d/%d using %s printer\n", i+1, receipt.Copies, printerName)
-		} else if runtime.GOOS == "darwin" {
+		if runtime.GOOS == "darwin" {
 			// macOS: use lp command with specified printer
 			cmd = exec.Command("lp", "-d", printerName, tempFile.Name())
 			fmt.Printf("Printing copy %d/%d using %s printer\n", i+1, receipt.Copies, printerName)
@@ -1175,36 +1239,6 @@ func printReceiptHandler(w http.ResponseWriter, r *http.Request, printerName str
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			log.Printf("Print error (copy %d/%d): %v - %s", i+1, receipt.Copies, err, string(output))
-			
-			// If printing fails and we're on Windows, try opening the HTML receipt in the browser
-			if runtime.GOOS == "windows" {
-				log.Printf("ESC/POS printing failed, trying with HTML...");
-				htmlContent, err := generateHTMLReceipt(receipt)
-				if err == nil {
-					// Create a temporary HTML file
-					htmlFile, err := ioutil.TempFile("", "receipt-*.html")
-					if err == nil {
-						htmlPath := htmlFile.Name()
-						
-						if _, err := htmlFile.WriteString(htmlContent); err == nil {
-							if err := htmlFile.Close(); err == nil {
-								// Open the HTML file in the default browser
-								browserCmd := exec.Command("cmd", "/c", "start", htmlPath)
-								browserCmd.Run() // Ignore errors here
-								
-								log.Printf("Opened HTML receipt in browser")
-								successCount++
-								continue
-							}
-						}
-						
-						// Close and remove the file if any steps failed
-						htmlFile.Close()
-						os.Remove(htmlPath)
-					}
-				}
-			}
-			
 			continue
 		}
 		successCount++
