@@ -653,212 +653,71 @@ func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string,
 	json.NewEncoder(w).Encode(resp)
 }
 
-// generateESCPOSCommands creates raw ESC/POS commands for thermal printers
-func generateESCPOSCommands(receipt ReceiptData) ([]byte, error) {
-	var cmd bytes.Buffer
-	
-	// Initialize printer - make sure it's in a clean state
-	cmd.Write([]byte{0x1B, 0x40}) // ESC @ - Initialize printer
-	
-	// Set character code page to PC437 (USA, Standard Europe) for consistent character rendering
-	cmd.Write([]byte{0x1B, 0x74, 0x00}) // ESC t 0
-	
-	// For 80mm printer, use appropriate font sizing
-	// Standard 80mm thermal printer can fit 42-48 characters per line at normal width
-	
-	// Center align
-	cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1 - Center alignment
-	
-	// Handle the special case for "No Sale" receipt
-	if receipt.Type == "noSale" {
-		// Set larger font for header
-		cmd.Write([]byte{0x1D, 0x21, 0x11}) // GS ! 17 - Double width & height
-		
-		// Set bold text
-		cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
-		cmd.WriteString("NO SALE\n\n")
-		cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
-		
-		// Set normal size for timestamp
-		cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
-		
-		// Add timestamp
-		if receipt.Timestamp != "" {
-			cmd.WriteString(receipt.Timestamp + "\n\n")
-		} else {
-			// Use current time if no timestamp provided
-			currentTime := time.Now().Format("2006-01-02 15:04:05")
-			cmd.WriteString(currentTime + "\n\n")
-		}
-		
-		// Add location if available
-		if receipt.Location != nil {
-			var locationName string
-			switch loc := receipt.Location.(type) {
-			case string:
-				locationName = loc
-			case map[string]interface{}:
-				if name, ok := loc["name"].(string); ok {
-					locationName = name
-				}
-			}
-			
-			if locationName != "" && locationName != "noSale" {
-				cmd.WriteString(locationName + "\n")
-			}
-		}
-		
-		// Extra space and cut paper
-		cmd.WriteString("\n\n\n")
-		cmd.Write([]byte{0x1D, 0x56, 0x41, 0x10}) // GS V A 16 (partial cut with feed)
-		
-		return cmd.Bytes(), nil
-	}
-	
-	// Get location name
-	var locationName string
-	switch loc := receipt.Location.(type) {
-	case string:
-		locationName = loc
-	case map[string]interface{}:
-		if name, ok := loc["name"].(string); ok {
-			locationName = name
-		}
-	}
-	
-	// Print header with large font
-	cmd.Write([]byte{0x1D, 0x21, 0x11}) // GS ! 17 - Double width & height
-	cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
-	cmd.WriteString(locationName + "\n")
-	cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
-	cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
-	
-	if receipt.CustomerName != "" {
-		cmd.WriteString("Customer: " + receipt.CustomerName + "\n")
-	}
-	
-	cmd.WriteString(receipt.Date + "\n\n")
-	
-	// Left align for the details
-	cmd.Write([]byte{0x1B, 0x61, 0x00}) // ESC a 0 - Left alignment
-	
-	// Check for extremely long transaction IDs and truncate if necessary
-	transactionID := receipt.TransactionID
-	if len(transactionID) > 40 {
-		// Truncate and add ellipsis
-		transactionID = transactionID[:37] + "..."
-	}
-	
-	// Print transaction info
-	cmd.WriteString("Transaction ID: " + transactionID + "\n")
-	cmd.WriteString("Payment: " + strings.Title(receipt.PaymentType) + "\n\n")
-	
-	// Print items section if there are items
-	if len(receipt.Items) > 0 {
-		// Print items header with larger font and bold
-		cmd.Write([]byte{0x1D, 0x21, 0x01}) // GS ! 1 - Double width
-		cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
-		cmd.WriteString("ITEMS\n")
-		cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
-		cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
-		
-		// Divider line - full width for 80mm (48 chars)
-		cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
-		cmd.WriteString("------------------------------------------------\n") // 48 dashes
-		cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
-		
-		for _, item := range receipt.Items {
-			// Item name in bold
-			cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
-			cmd.WriteString(item.Name + "\n")
-			cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
-			
-			// Format quantity with appropriate precision
-			var quantityStr string
-			if item.Quantity == float64(int(item.Quantity)) {
-				// If it's a whole number, display as integer
-				quantityStr = fmt.Sprintf("%d", int(item.Quantity))
-			} else {
-				// Otherwise, display with up to 3 decimal places, trimming trailing zeros
-				quantityStr = strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.3f", item.Quantity), "0"), ".")
-			}
-			
-			quantityPrice := fmt.Sprintf("%s x $%.2f", quantityStr, item.Price)
-			// Calculate total price for the item
-			itemTotal := fmt.Sprintf("$%.2f", item.Quantity*item.Price)
-			cmd.WriteString(fmt.Sprintf("  %-34s %10s\n", quantityPrice, itemTotal))
-			
-			if item.SKU != "" {
-				cmd.WriteString("  SKU: " + item.SKU + "\n")
-			}
-			cmd.WriteString("\n")
-		}
-	}
-	
-	// Divider line - full width for 80mm (48 chars)
-	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
-	cmd.WriteString("------------------------------------------------\n") // 48 dashes
-	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
-	
-	// Print totals with wider spacing for 80mm
-	cmd.WriteString(fmt.Sprintf("%-34s $%.2f\n", "Subtotal:", receipt.Subtotal))
-	
-	if receipt.DiscountPercentage > 0 && receipt.DiscountAmount > 0 {
-		cmd.WriteString(fmt.Sprintf("%-34s -$%.2f\n", fmt.Sprintf("Discount (%.0f%%):", receipt.DiscountPercentage), receipt.DiscountAmount))
-	}
-	
-	cmd.WriteString(fmt.Sprintf("%-34s $%.2f\n", "Tax:", receipt.Tax))
-	
-	// Calculate GST and PST if tax is present
-	if receipt.Tax > 0 {
-		gst := receipt.Subtotal * 0.05
-		pst := receipt.Subtotal * 0.07
-		cmd.WriteString(fmt.Sprintf("  %-32s $%.2f\n", "GST (5%):", gst))
-		cmd.WriteString(fmt.Sprintf("  %-32s $%.2f\n", "PST (7%):", pst))
-	}
-	
-	if receipt.RefundAmount > 0 {
-		cmd.WriteString(fmt.Sprintf("%-34s -$%.2f\n", "Refund:", receipt.RefundAmount))
-	}
-	
-	if receipt.Tip > 0 {
-		cmd.WriteString(fmt.Sprintf("%-34s $%.2f\n", "Tip:", receipt.Tip))
-	}
-	
-	// Divider line - full width for 80mm (48 chars)
-	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
-	cmd.WriteString("------------------------------------------------\n") // 48 dashes
-	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
-	
-	// Print total in bold and larger font
-	cmd.Write([]byte{0x1D, 0x21, 0x11}) // GS ! 17 - Double width & height
-	cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
-	cmd.WriteString(fmt.Sprintf("TOTAL: $%.2f\n", receipt.Total))
-	cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
-	cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
-	
-	// Print cash details if applicable
-	if receipt.PaymentType == "cash" && receipt.CashGiven > 0 {
-		cmd.WriteString(fmt.Sprintf("%-34s $%.2f\n", "Cash:", receipt.CashGiven))
-		cmd.WriteString(fmt.Sprintf("%-34s $%.2f\n", "Change:", receipt.ChangeDue))
-	}
-	
-	// Divider line - full width for 80mm (48 chars)
-	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
-	cmd.WriteString("------------------------------------------------\n") // 48 dashes
-	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
-	
-	// Center align for footer
-	cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1 - Center alignment
-	
-	// Print footer
-	cmd.WriteString("\nThank you for your purchase!\n")
-	cmd.WriteString("Visit us again at " + locationName + "\n\n\n")
-	
-	// Cut paper
-	cmd.Write([]byte{0x1D, 0x56, 0x41, 0x10}) // GS V A 16 (partial cut with feed)
-	
-	return cmd.Bytes(), nil
+// Print HTML receipt directly on Windows
+func printDirectlyOnWindows(htmlFilePath string, printerName string) error {
+    // PowerShell script for direct printing
+    psScript := fmt.Sprintf(`
+    Add-Type -AssemblyName System.Drawing
+    Add-Type -AssemblyName System.Windows.Forms
+
+    $htmlContent = Get-Content -Path "%s" -Raw
+    $webBrowser = New-Object System.Windows.Forms.WebBrowser
+    $webBrowser.DocumentText = $htmlContent
+    $webBrowser.DocumentCompleted.Add({
+        $webBrowser.ShowPrintDialog()
+    })
+
+    # Give it time to render and print
+    Start-Sleep -Seconds 5
+    `, htmlFilePath)
+
+    // Save the PowerShell script to a temp file
+    psFile, err := ioutil.TempFile("", "print-*.ps1")
+    if err != nil {
+        return err
+    }
+    defer os.Remove(psFile.Name())
+
+    if _, err := psFile.WriteString(psScript); err != nil {
+        return err
+    }
+    if err := psFile.Close(); err != nil {
+        return err
+    }
+
+    // Execute the PowerShell script
+    cmd := exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-File", psFile.Name())
+    return cmd.Run()
+}
+
+// Create a batch file to print using Edge browser
+func printWithEdgeBrowser(htmlFilePath string, printerName string) error {
+    // Create a batch file
+    printBatFile, err := ioutil.TempFile("", "print-*.bat")
+    if err != nil {
+        return err
+    }
+    defer os.Remove(printBatFile.Name())
+    
+    // Create a batch file that opens the HTML file with Microsoft Edge in print mode
+    printBatContent := fmt.Sprintf(`
+    @echo off
+    start /min "" "msedge" --kiosk --print "%s" --printer="%s"
+    timeout /t 5
+    taskkill /f /im msedge.exe
+    `, htmlFilePath, printerName)
+    
+    if _, err := printBatFile.WriteString(printBatContent); err != nil {
+        return err
+    }
+    
+    if err := printBatFile.Close(); err != nil {
+        return err
+    }
+    
+    // Execute the batch file
+    cmd := exec.Command("cmd", "/C", printBatFile.Name())
+    return cmd.Run()
 }
 
 // generateHTMLReceipt creates a clean HTML receipt that will print nicely
@@ -874,67 +733,70 @@ func generateHTMLReceipt(receipt ReceiptData) (string, error) {
         }
     }
 
-    // Start building HTML
+    // Start building HTML with improved styles
     html := `<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
     <title>Receipt</title>
     <style>
+        @page {
+            size: 80mm 297mm; /* Standard thermal receipt width, adapt height automatically */
+            margin: 1mm;
+        }
         body {
-            font-family: Arial, sans-serif;
+            font-family: 'Courier New', monospace; /* Better for receipt printers */
             font-size: 10pt;
             margin: 0;
-            padding: 0;
-            width: 3in; /* Standard thermal receipt width */
+            padding: 2mm;
+            width: 76mm; /* Allow for margins */
         }
         .receipt {
             width: 100%;
-            padding: 5px;
         }
         .header, .footer {
             text-align: center;
-            margin-bottom: 10px;
+            margin-bottom: 3mm;
         }
         .store-name {
-            font-size: 14pt;
+            font-size: 12pt;
             font-weight: bold;
         }
         .divider {
             border-top: 1px dashed #000;
-            margin: 10px 0;
+            margin: 2mm 0;
         }
         .item {
-            margin-bottom: 8px;
+            margin-bottom: 2mm;
         }
         .item-name {
             font-weight: bold;
         }
         .item-details {
-            padding-left: 10px;
+            padding-left: 3mm;
         }
         .totals {
-            margin-top: 10px;
+            margin-top: 2mm;
         }
         .total-line {
             display: flex;
             justify-content: space-between;
+            margin: 1mm 0;
         }
         .grand-total {
             font-weight: bold;
-            font-size: 12pt;
-            margin-top: 10px;
+            font-size: 11pt;
+            margin-top: 3mm;
             text-align: center;
-            padding: 5px;
+            padding: 2mm;
             background-color: #f5f5f5;
         }
+        /* Ensure content is visible when printing */
         @media print {
-            @page {
-                size: 3in auto;
-                margin: 0mm;
-            }
-            body {
-                width: 100%;
+            * {
+                color-adjust: exact !important;
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
             }
         }
     </style>
@@ -1074,6 +936,14 @@ func generateHTMLReceipt(receipt ReceiptData) (string, error) {
             <div>Visit us again at ` + locationName + `</div>
         </div>
     </div>
+    <script>
+    // Auto-print script - will attempt to print as soon as the page loads
+    window.onload = function() {
+        setTimeout(function() {
+            window.print();
+        }, 500);
+    };
+    </script>
 </body>
 </html>`
 
@@ -1108,12 +978,16 @@ func printHTMLReceiptHandler(w http.ResponseWriter, r *http.Request, printerName
         receipt.Copies = 1
     }
     
+    log.Printf("Generating HTML receipt for printing...")
+    
     // Generate HTML receipt
     htmlContent, err := generateHTMLReceipt(receipt)
     if err != nil {
         writeJSONError(w, http.StatusInternalServerError, errors.New("error generating HTML receipt"))
         return
     }
+    
+    log.Printf("Generated HTML content length: %d bytes", len(htmlContent))
     
     // Create a temporary HTML file
     tempFile, err := ioutil.TempFile("", "receipt-*.html")
@@ -1124,6 +998,8 @@ func printHTMLReceiptHandler(w http.ResponseWriter, r *http.Request, printerName
     
     tempFilePath := tempFile.Name()
     defer os.Remove(tempFilePath)
+    
+    log.Printf("Saving to temp file: %s", tempFilePath)
     
     // Write the HTML content to the file
     if _, err := tempFile.WriteString(htmlContent); err != nil {
@@ -1141,27 +1017,59 @@ func printHTMLReceiptHandler(w http.ResponseWriter, r *http.Request, printerName
     successCount := 0
     for i := 0; i < receipt.Copies; i++ {
         var cmd *exec.Cmd
+        var output []byte
+        var err error
         
         if runtime.GOOS == "windows" {
-            // On Windows, use the default browser to print silently
-            cmd = exec.Command("powershell", "-Command", 
-                fmt.Sprintf("Start-Process \"$env:SystemRoot\\System32\\rundll32.exe\" -ArgumentList \"mshtml.dll,PrintHTML '%s'\" -WindowStyle Hidden", tempFilePath))
+            // Try multiple methods for Windows
+            log.Printf("Trying to print on Windows using Edge browser...")
+            if err := printWithEdgeBrowser(tempFilePath, printerName); err != nil {
+                log.Printf("Edge browser printing failed: %v", err)
+                
+                log.Printf("Trying to print on Windows using direct method...")
+                if err := printDirectlyOnWindows(tempFilePath, printerName); err != nil {
+                    log.Printf("Direct Windows printing failed: %v", err)
+                    
+                    // Fall back to the mshtml.dll method
+                    log.Printf("Falling back to mshtml.dll method...")
+                    cmd = exec.Command("powershell", "-Command", 
+                        fmt.Sprintf("Start-Process \"$env:SystemRoot\\System32\\rundll32.exe\" -ArgumentList \"mshtml.dll,PrintHTML '%s'\" -WindowStyle Hidden", tempFilePath))
+                    output, err = cmd.CombinedOutput()
+                    if err != nil {
+                        log.Printf("Print error (copy %d/%d): %v - %s", i+1, receipt.Copies, err, string(output))
+                        continue
+                    }
+                } else {
+                    successCount++
+                    log.Printf("Successfully printed copy %d/%d using direct Windows method", i+1, receipt.Copies)
+                    continue
+                }
+            } else {
+                successCount++
+                log.Printf("Successfully printed copy %d/%d using Edge browser", i+1, receipt.Copies)
+                continue
+            }
         } else if runtime.GOOS == "darwin" {
             // On macOS
             cmd = exec.Command("lp", "-d", printerName, tempFilePath)
+            output, err = cmd.CombinedOutput()
+            if err != nil {
+                log.Printf("Print error (copy %d/%d): %v - %s", i+1, receipt.Copies, err, string(output))
+                continue
+            }
         } else {
             // On Linux
             cmd = exec.Command("lp", "-d", printerName, tempFilePath)
+            output, err = cmd.CombinedOutput()
+            if err != nil {
+                log.Printf("Print error (copy %d/%d): %v - %s", i+1, receipt.Copies, err, string(output))
+                continue
+            }
         }
         
-        output, err := cmd.CombinedOutput()
-        if err != nil {
-            log.Printf("Print error (copy %d/%d): %v - %s", i+1, receipt.Copies, err, string(output))
-            continue
-        }
-        
+        log.Printf("Printing command output: %s", string(output))
         successCount++
-        fmt.Printf("Successfully printed copy %d/%d\n", i+1, receipt.Copies)
+        log.Printf("Successfully printed copy %d/%d", i+1, receipt.Copies)
     }
     
     // Return response
@@ -1177,42 +1085,40 @@ func printHTMLReceiptHandler(w http.ResponseWriter, r *http.Request, printerName
     }
 }
 
-
 func main() {
-	scannerPortFlag := flag.String("scanner-port", "CON3", "Scanner port (e.g., CON3, CON4)")
-	portFlag := flag.String("port", "COM4", "Serial port to connect to (e.g., COM1, /dev/ttyUSB0)")
-	httpPortFlag := flag.Int("http-port", 3500, "HTTP server port")
-	useSimpleCommandFlag := flag.Bool("simple-command", true, "Use simple command format without port parameter")
-	useMacSettingsFlag := flag.Bool("mac-settings", true, "Use Mac serial port settings (9600 baud, 8 data bits)")
-	readTimeoutFlag := flag.Int("timeout", 10, "Read timeout in seconds")
-	printerNameFlag := flag.String("printer", "Receipt1", "Printer name (default: Receipt1)")
-	flag.Parse()
-	
-	readTimeout := time.Duration(*readTimeoutFlag) * time.Second
-	
-	fmt.Printf("Starting with scanner port: %s, serial port: %s, HTTP port: %d, read timeout: %d seconds\n", 
-		*scannerPortFlag, *portFlag, *httpPortFlag, *readTimeoutFlag)
-	fmt.Printf("Simple command: %v, Mac settings: %v\n", *useSimpleCommandFlag, *useMacSettingsFlag)
-	fmt.Printf("Using printer: %s\n", *printerNameFlag)
-	
-	mux := http.NewServeMux()
-	
-	// Scanner endpoint
-	mux.HandleFunc("/scanner/scan", func(w http.ResponseWriter, r *http.Request) {
-		scannerHandler(w, r, *portFlag, *scannerPortFlag, *useSimpleCommandFlag, *useMacSettingsFlag, readTimeout)
-	})
-	
-	// Receipt printing endpoint - pass the printer name to the handler
-	mux.HandleFunc("/print/receipt", func(w http.ResponseWriter, r *http.Request) {
-		printHTMLReceiptHandler(w, r, *printerNameFlag)
-	})
-	
-	log.Printf("Starting server on http://localhost:%d", *httpPortFlag)
-	log.Printf("Scanner endpoint: http://localhost:%d/scanner/scan", *httpPortFlag)
-	log.Printf("Receipt printer endpoint: http://localhost:%d/print/receipt", *httpPortFlag)
-	log.Printf("HTML receipt printer endpoint: http://localhost:%d/print/html-receipt", *httpPortFlag)
-	
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", *httpPortFlag), corsMiddleware(mux)); err != nil {
-		log.Fatal(err)
-	}
+    scannerPortFlag := flag.String("scanner-port", "CON3", "Scanner port (e.g., CON3, CON4)")
+    portFlag := flag.String("port", "COM4", "Serial port to connect to (e.g., COM1, /dev/ttyUSB0)")
+    httpPortFlag := flag.Int("http-port", 3500, "HTTP server port")
+    useSimpleCommandFlag := flag.Bool("simple-command", true, "Use simple command format without port parameter")
+    useMacSettingsFlag := flag.Bool("mac-settings", true, "Use Mac serial port settings (9600 baud, 8 data bits)")
+    readTimeoutFlag := flag.Int("timeout", 10, "Read timeout in seconds")
+    printerNameFlag := flag.String("printer", "Receipt1", "Printer name (default: Receipt1)")
+    flag.Parse()
+    
+    readTimeout := time.Duration(*readTimeoutFlag) * time.Second
+    
+    fmt.Printf("Starting with scanner port: %s, serial port: %s, HTTP port: %d, read timeout: %d seconds\n", 
+        *scannerPortFlag, *portFlag, *httpPortFlag, *readTimeoutFlag)
+    fmt.Printf("Simple command: %v, Mac settings: %v\n", *useSimpleCommandFlag, *useMacSettingsFlag)
+    fmt.Printf("Using printer: %s\n", *printerNameFlag)
+    
+    mux := http.NewServeMux()
+    
+    // Scanner endpoint
+    mux.HandleFunc("/scanner/scan", func(w http.ResponseWriter, r *http.Request) {
+        scannerHandler(w, r, *portFlag, *scannerPortFlag, *useSimpleCommandFlag, *useMacSettingsFlag, readTimeout)
+    })
+    
+    // Receipt printing endpoint - HTML only
+    mux.HandleFunc("/print/receipt", func(w http.ResponseWriter, r *http.Request) {
+        printHTMLReceiptHandler(w, r, *printerNameFlag)
+    })
+    
+    log.Printf("Starting server on http://localhost:%d", *httpPortFlag)
+    log.Printf("Scanner endpoint: http://localhost:%d/scanner/scan", *httpPortFlag)
+    log.Printf("Receipt printer endpoint: http://localhost:%d/print/receipt", *httpPortFlag)
+    
+    if err := http.ListenAndServe(fmt.Sprintf(":%d", *httpPortFlag), corsMiddleware(mux)); err != nil {
+        log.Fatal(err)
+    }
 }
