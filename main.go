@@ -831,7 +831,7 @@ func generateESCPOSCommands(receipt ReceiptData) ([]byte, error) {
 }
 
 // printReceipt handles the receipt printing functionality
-func printReceiptHandler(w http.ResponseWriter, r *http.Request) {
+func printReceiptHandler(w http.ResponseWriter, r *http.Request, printerName string) {
 	// Only allow POST method
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, errors.New("only POST method is allowed"))
@@ -897,17 +897,17 @@ func printReceiptHandler(w http.ResponseWriter, r *http.Request) {
 	successCount := 0
 	for i := 0; i < receipt.Copies; i++ {
 		if runtime.GOOS == "windows" {
-			// Windows: use PowerShell to send to a specific printer (Receipt1)
-			cmd = exec.Command("powershell", "-Command", fmt.Sprintf("Get-Content -Path '%s' -Raw | Out-Printer -Name 'Receipt1'", tempFile.Name()))
-			fmt.Printf("Printing copy %d/%d using Receipt1 printer\n", i+1, receipt.Copies)
+			// Windows: use PowerShell to send to the specified printer
+			cmd = exec.Command("powershell", "-Command", fmt.Sprintf("Get-Content -Path '%s' -Raw | Out-Printer -Name '%s'", tempFile.Name(), printerName))
+			fmt.Printf("Printing copy %d/%d using %s printer\n", i+1, receipt.Copies, printerName)
 		} else if runtime.GOOS == "darwin" {
-			// macOS: use lp command with specific printer
-			cmd = exec.Command("lp", "-d", "Receipt1", tempFile.Name())
-			fmt.Printf("Printing copy %d/%d using Receipt1 printer\n", i+1, receipt.Copies)
+			// macOS: use lp command with specified printer
+			cmd = exec.Command("lp", "-d", printerName, tempFile.Name())
+			fmt.Printf("Printing copy %d/%d using %s printer\n", i+1, receipt.Copies, printerName)
 		} else {
-			// Linux: use lp command with specific printer
-			cmd = exec.Command("lp", "-d", "Receipt1", tempFile.Name())
-			fmt.Printf("Printing copy %d/%d using Receipt1 printer\n", i+1, receipt.Copies)
+			// Linux: use lp command with specified printer
+			cmd = exec.Command("lp", "-d", printerName, tempFile.Name())
+			fmt.Printf("Printing copy %d/%d using %s printer\n", i+1, receipt.Copies, printerName)
 		}
 		
 		// Execute the command
@@ -957,8 +957,10 @@ func main() {
 		scannerHandler(w, r, *portFlag, *scannerPortFlag, *useSimpleCommandFlag, *useMacSettingsFlag, readTimeout)
 	})
 	
-	// Receipt printing endpoint
-	mux.HandleFunc("/print/receipt", printReceiptHandler)
+	// Receipt printing endpoint - pass the printer name to the handler
+	mux.HandleFunc("/print/receipt", func(w http.ResponseWriter, r *http.Request) {
+		printReceiptHandler(w, r, *printerNameFlag)
+	})
 	
 	log.Printf("Starting server on http://localhost:%d", *httpPortFlag)
 	log.Printf("Scanner endpoint: http://localhost:%d/scanner/scan", *httpPortFlag)
