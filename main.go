@@ -655,17 +655,214 @@ func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string,
 
 // generateESCPOSCommands creates raw ESC/POS commands for thermal printers
 func generateESCPOSCommands(receipt ReceiptData) ([]byte, error) {
-    var cmd bytes.Buffer
-    
-    // Initialize printer
-    cmd.Write([]byte{0x1B, 0x40}) // ESC @ - Initialize printer
-    
-    // Set character size for headers (make slightly smaller)
-    cmd.Write([]byte{0x1D, 0x21, 0x01}) // GS ! 1 - Only slightly larger font
-    
-    // Center align for header
-    cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1 - Center alignment
-    
+	var cmd bytes.Buffer
+	
+	// Initialize printer - make sure it's in a clean state
+	cmd.Write([]byte{0x1B, 0x40}) // ESC @ - Initialize printer
+	
+	// Set character code page to PC437 (USA, Standard Europe) for consistent character rendering
+	cmd.Write([]byte{0x1B, 0x74, 0x00}) // ESC t 0
+	
+	// For 80mm printer, use appropriate font sizing
+	// Standard 80mm thermal printer can fit 42-48 characters per line at normal width
+	
+	// Center align
+	cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1 - Center alignment
+	
+	// Handle the special case for "No Sale" receipt
+	if receipt.Type == "noSale" {
+		// Set larger font for header
+		cmd.Write([]byte{0x1D, 0x21, 0x11}) // GS ! 17 - Double width & height
+		
+		// Set bold text
+		cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
+		cmd.WriteString("NO SALE\n\n")
+		cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
+		
+		// Set normal size for timestamp
+		cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
+		
+		// Add timestamp
+		if receipt.Timestamp != "" {
+			cmd.WriteString(receipt.Timestamp + "\n\n")
+		} else {
+			// Use current time if no timestamp provided
+			currentTime := time.Now().Format("2006-01-02 15:04:05")
+			cmd.WriteString(currentTime + "\n\n")
+		}
+		
+		// Add location if available
+		if receipt.Location != nil {
+			var locationName string
+			switch loc := receipt.Location.(type) {
+			case string:
+				locationName = loc
+			case map[string]interface{}:
+				if name, ok := loc["name"].(string); ok {
+					locationName = name
+				}
+			}
+			
+			if locationName != "" && locationName != "noSale" {
+				cmd.WriteString(locationName + "\n")
+			}
+		}
+		
+		// Extra space and cut paper
+		cmd.WriteString("\n\n\n")
+		cmd.Write([]byte{0x1D, 0x56, 0x41, 0x10}) // GS V A 16 (partial cut with feed)
+		
+		return cmd.Bytes(), nil
+	}
+	
+	// Get location name
+	var locationName string
+	switch loc := receipt.Location.(type) {
+	case string:
+		locationName = loc
+	case map[string]interface{}:
+		if name, ok := loc["name"].(string); ok {
+			locationName = name
+		}
+	}
+	
+	// Print header with large font
+	cmd.Write([]byte{0x1D, 0x21, 0x11}) // GS ! 17 - Double width & height
+	cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
+	cmd.WriteString(locationName + "\n")
+	cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
+	cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
+	
+	if receipt.CustomerName != "" {
+		cmd.WriteString("Customer: " + receipt.CustomerName + "\n")
+	}
+	
+	cmd.WriteString(receipt.Date + "\n\n")
+	
+	// Left align for the details
+	cmd.Write([]byte{0x1B, 0x61, 0x00}) // ESC a 0 - Left alignment
+	
+	// Check for extremely long transaction IDs and truncate if necessary
+	transactionID := receipt.TransactionID
+	if len(transactionID) > 40 {
+		// Truncate and add ellipsis
+		transactionID = transactionID[:37] + "..."
+	}
+	
+	// Print transaction info
+	cmd.WriteString("Transaction ID: " + transactionID + "\n")
+	cmd.WriteString("Payment: " + strings.Title(receipt.PaymentType) + "\n\n")
+	
+	// Print items section if there are items
+	if len(receipt.Items) > 0 {
+		// Print items header with larger font and bold
+		cmd.Write([]byte{0x1D, 0x21, 0x01}) // GS ! 1 - Double width
+		cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
+		cmd.WriteString("ITEMS\n")
+		cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
+		cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
+		
+		// Divider line - full width for 80mm (48 chars)
+		cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
+		cmd.WriteString("------------------------------------------------\n") // 48 dashes
+		cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
+		
+		for _, item := range receipt.Items {
+			// Item name in bold
+			cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
+			cmd.WriteString(item.Name + "\n")
+			cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
+			
+			// Format quantity with appropriate precision
+			var quantityStr string
+			if item.Quantity == float64(int(item.Quantity)) {
+				// If it's a whole number, display as integer
+				quantityStr = fmt.Sprintf("%d", int(item.Quantity))
+			} else {
+				// Otherwise, display with up to 3 decimal places, trimming trailing zeros
+				quantityStr = strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.3f", item.Quantity), "0"), ".")
+			}
+			
+			quantityPrice := fmt.Sprintf("%s x $%.2f", quantityStr, item.Price)
+			// Calculate total price for the item
+			itemTotal := fmt.Sprintf("$%.2f", item.Quantity*item.Price)
+			cmd.WriteString(fmt.Sprintf("  %-34s %10s\n", quantityPrice, itemTotal))
+			
+			if item.SKU != "" {
+				cmd.WriteString("  SKU: " + item.SKU + "\n")
+			}
+			cmd.WriteString("\n")
+		}
+	}
+	
+	// Divider line - full width for 80mm (48 chars)
+	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
+	cmd.WriteString("------------------------------------------------\n") // 48 dashes
+	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
+	
+	// Print totals with wider spacing for 80mm
+	cmd.WriteString(fmt.Sprintf("%-34s $%.2f\n", "Subtotal:", receipt.Subtotal))
+	
+	if receipt.DiscountPercentage > 0 && receipt.DiscountAmount > 0 {
+		cmd.WriteString(fmt.Sprintf("%-34s -$%.2f\n", fmt.Sprintf("Discount (%.0f%%):", receipt.DiscountPercentage), receipt.DiscountAmount))
+	}
+	
+	cmd.WriteString(fmt.Sprintf("%-34s $%.2f\n", "Tax:", receipt.Tax))
+	
+	// Calculate GST and PST if tax is present
+	if receipt.Tax > 0 {
+		gst := receipt.Subtotal * 0.05
+		pst := receipt.Subtotal * 0.07
+		cmd.WriteString(fmt.Sprintf("  %-32s $%.2f\n", "GST (5%):", gst))
+		cmd.WriteString(fmt.Sprintf("  %-32s $%.2f\n", "PST (7%):", pst))
+	}
+	
+	if receipt.RefundAmount > 0 {
+		cmd.WriteString(fmt.Sprintf("%-34s -$%.2f\n", "Refund:", receipt.RefundAmount))
+	}
+	
+	if receipt.Tip > 0 {
+		cmd.WriteString(fmt.Sprintf("%-34s $%.2f\n", "Tip:", receipt.Tip))
+	}
+	
+	// Divider line - full width for 80mm (48 chars)
+	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
+	cmd.WriteString("------------------------------------------------\n") // 48 dashes
+	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
+	
+	// Print total in bold and larger font
+	cmd.Write([]byte{0x1D, 0x21, 0x11}) // GS ! 17 - Double width & height
+	cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
+	cmd.WriteString(fmt.Sprintf("TOTAL: $%.2f\n", receipt.Total))
+	cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
+	cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
+	
+	// Print cash details if applicable
+	if receipt.PaymentType == "cash" && receipt.CashGiven > 0 {
+		cmd.WriteString(fmt.Sprintf("%-34s $%.2f\n", "Cash:", receipt.CashGiven))
+		cmd.WriteString(fmt.Sprintf("%-34s $%.2f\n", "Change:", receipt.ChangeDue))
+	}
+	
+	// Divider line - full width for 80mm (48 chars)
+	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
+	cmd.WriteString("------------------------------------------------\n") // 48 dashes
+	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
+	
+	// Center align for footer
+	cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1 - Center alignment
+	
+	// Print footer
+	cmd.WriteString("\nThank you for your purchase!\n")
+	cmd.WriteString("Visit us again at " + locationName + "\n\n\n")
+	
+	// Cut paper
+	cmd.Write([]byte{0x1D, 0x56, 0x41, 0x10}) // GS V A 16 (partial cut with feed)
+	
+	return cmd.Bytes(), nil
+}
+
+// generateHTMLReceipt creates a clean HTML receipt that will print nicely
+func generateHTMLReceipt(receipt ReceiptData) (string, error) {
     // Get location name
     var locationName string
     switch loc := receipt.Location.(type) {
@@ -676,261 +873,310 @@ func generateESCPOSCommands(receipt ReceiptData) ([]byte, error) {
             locationName = name
         }
     }
-    
-    // Print store name in bold
-    cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 - Bold on
-    cmd.WriteString(locationName + "\n")
-    cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 - Bold off
-    
-    // Set normal font size
-    cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
-    
-    // Print customer name if available
-    if receipt.CustomerName != "" {
-        cmd.WriteString("Customer: " + receipt.CustomerName + "\n")
-    }
-    
-    // Print date
-    cmd.WriteString(receipt.Date + "\n\n")
-    
-    // Left align for details
-    cmd.Write([]byte{0x1B, 0x61, 0x00}) // ESC a 0 - Left alignment
-    
-    // Use a simple line for dividers (more compatible with different printers)
-    cmd.WriteString("----------------------------------------\n")
-    
-    // Ensure the transaction ID fits properly
-    transactionID := receipt.TransactionID
-    if len(transactionID) > 35 {
-        transactionID = transactionID[:32] + "..."
-    }
-    
-    // Print transaction details
-    cmd.WriteString("Transaction: " + transactionID + "\n")
-    cmd.WriteString("Payment: " + strings.Title(receipt.PaymentType) + "\n")
-    
-    cmd.WriteString("----------------------------------------\n")
-    
-    // Print items header in bold
-    cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 - Bold on
-    cmd.WriteString("ITEMS\n")
-    cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 - Bold off
-    
-    // Print items with proper spacing (adjust column widths)
-    for _, item := range receipt.Items {
-        // Print item name (truncate if too long)
-        itemName := item.Name
-        if len(itemName) > 37 {
-            itemName = itemName[:34] + "..."
+
+    // Start building HTML
+    html := `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Receipt</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            font-size: 10pt;
+            margin: 0;
+            padding: 0;
+            width: 3in; /* Standard thermal receipt width */
         }
-        cmd.WriteString(itemName + "\n")
+        .receipt {
+            width: 100%;
+            padding: 5px;
+        }
+        .header, .footer {
+            text-align: center;
+            margin-bottom: 10px;
+        }
+        .store-name {
+            font-size: 14pt;
+            font-weight: bold;
+        }
+        .divider {
+            border-top: 1px dashed #000;
+            margin: 10px 0;
+        }
+        .item {
+            margin-bottom: 8px;
+        }
+        .item-name {
+            font-weight: bold;
+        }
+        .item-details {
+            padding-left: 10px;
+        }
+        .totals {
+            margin-top: 10px;
+        }
+        .total-line {
+            display: flex;
+            justify-content: space-between;
+        }
+        .grand-total {
+            font-weight: bold;
+            font-size: 12pt;
+            margin-top: 10px;
+            text-align: center;
+            padding: 5px;
+            background-color: #f5f5f5;
+        }
+        @media print {
+            @page {
+                size: 3in auto;
+                margin: 0mm;
+            }
+            body {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="receipt">
+        <div class="header">
+            <div class="store-name">` + locationName + `</div>`
+
+    if receipt.CustomerName != "" {
+        html += `
+            <div>Customer: ` + receipt.CustomerName + `</div>`
+    }
+
+    html += `
+            <div>` + receipt.Date + `</div>
+        </div>
         
-        // Format quantity correctly
+        <div class="divider"></div>
+        
+        <div>Transaction ID: ` + receipt.TransactionID + `</div>
+        <div>Payment: ` + strings.Title(receipt.PaymentType) + `</div>
+        
+        <div class="divider"></div>
+        
+        <div style="font-weight: bold;">ITEMS</div>`
+
+    // Add items
+    for _, item := range receipt.Items {
+        // Format quantity
         var quantityStr string
         if item.Quantity == float64(int(item.Quantity)) {
             quantityStr = fmt.Sprintf("%d", int(item.Quantity))
         } else {
             quantityStr = strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.3f", item.Quantity), "0"), ".")
         }
-        
-        // Format quantity and price line with proper alignment
-        // Format the spaces to right-align the price
-        quantityPrice := fmt.Sprintf("%s x $%.2f", quantityStr, item.Price)
-        itemTotal := fmt.Sprintf("$%.2f", item.Quantity*item.Price)
-        
-        // Calculate spaces needed to right-align
-        spaces := 40 - len(quantityPrice) - len(itemTotal)
-        if spaces < 1 {
-            spaces = 1
-        }
-        
-        cmd.WriteString("  " + quantityPrice + strings.Repeat(" ", spaces) + itemTotal + "\n")
-        
-        // Print SKU if available
+
+        html += `
+        <div class="item">
+            <div class="item-name">` + item.Name + `</div>
+            <div class="item-details">
+                <div class="total-line">
+                    <span>` + quantityStr + ` x $` + fmt.Sprintf("%.2f", item.Price) + `</span>
+                    <span>$` + fmt.Sprintf("%.2f", item.Quantity*item.Price) + `</span>
+                </div>`
+
         if item.SKU != "" {
-            cmd.WriteString("  SKU: " + item.SKU + "\n")
+            html += `
+                <div>SKU: ` + item.SKU + `</div>`
         }
-        cmd.WriteString("\n")
+
+        html += `
+            </div>
+        </div>`
     }
-    
-    cmd.WriteString("----------------------------------------\n")
-    
-    // Print totals section with better alignment
-    printTotalLine := func(label string, value float64, prefix string) {
-        if prefix == "" {
-            prefix = "$"
-        }
-        valueStr := fmt.Sprintf("%s%.2f", prefix, value)
-        spaces := 40 - len(label) - len(valueStr)
-        if spaces < 1 {
-            spaces = 1
-        }
-        cmd.WriteString(label + strings.Repeat(" ", spaces) + valueStr + "\n")
-    }
-    
-    // Print subtotal, discount, tax, etc.
-    printTotalLine("Subtotal:", receipt.Subtotal, "$")
-    
+
+    html += `
+        <div class="divider"></div>
+        
+        <div class="totals">
+            <div class="total-line">
+                <span>Subtotal:</span>
+                <span>$` + fmt.Sprintf("%.2f", receipt.Subtotal) + `</span>
+            </div>`
+
     if receipt.DiscountPercentage > 0 && receipt.DiscountAmount > 0 {
-        discountLabel := fmt.Sprintf("Discount (%.0f%%):", receipt.DiscountPercentage)
-        printTotalLine(discountLabel, receipt.DiscountAmount, "-$")
+        html += `
+            <div class="total-line">
+                <span>Discount (` + fmt.Sprintf("%.0f", receipt.DiscountPercentage) + `%):</span>
+                <span>-$` + fmt.Sprintf("%.2f", receipt.DiscountAmount) + `</span>
+            </div>`
     }
-    
-    printTotalLine("Tax:", receipt.Tax, "$")
-    
-    // Calculate GST and PST
+
+    html += `
+            <div class="total-line">
+                <span>Tax:</span>
+                <span>$` + fmt.Sprintf("%.2f", receipt.Tax) + `</span>
+            </div>`
+
+    // GST and PST
     if receipt.Tax > 0 {
         gst := receipt.Subtotal * 0.05
         pst := receipt.Subtotal * 0.07
-        cmd.WriteString(fmt.Sprintf("  GST (5%%): $%.2f\n", gst))
-        cmd.WriteString(fmt.Sprintf("  PST (7%%): $%.2f\n", pst))
+        html += `
+            <div style="padding-left: 10px;">
+                <div>GST (5%): $` + fmt.Sprintf("%.2f", gst) + `</div>
+                <div>PST (7%): $` + fmt.Sprintf("%.2f", pst) + `</div>
+            </div>`
     }
-    
+
     if receipt.RefundAmount > 0 {
-        printTotalLine("Refund:", receipt.RefundAmount, "-$")
+        html += `
+            <div class="total-line">
+                <span>Refund:</span>
+                <span>-$` + fmt.Sprintf("%.2f", receipt.RefundAmount) + `</span>
+            </div>`
     }
-    
+
     if receipt.Tip > 0 {
-        printTotalLine("Tip:", receipt.Tip, "$")
+        html += `
+            <div class="total-line">
+                <span>Tip:</span>
+                <span>$` + fmt.Sprintf("%.2f", receipt.Tip) + `</span>
+            </div>`
     }
-    
-    cmd.WriteString("----------------------------------------\n")
-    
-    // Print total in bold and slightly larger
-    cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 - Bold on
-    cmd.Write([]byte{0x1D, 0x21, 0x11}) // GS ! 17 - Double width & height
-    
-    // Center align for total
-    cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1 - Center alignment
-    cmd.WriteString(fmt.Sprintf("TOTAL: $%.2f\n", receipt.Total))
-    
-    // Reset formatting
-    cmd.Write([]byte{0x1D, 0x21, 0x00}) // GS ! 0 - Normal size
-    cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 - Bold off
-    cmd.Write([]byte{0x1B, 0x61, 0x00}) // ESC a 0 - Left alignment
-    
-    // Print cash details if applicable
+
+    html += `
+        </div>
+        
+        <div class="grand-total">
+            <div class="total-line">
+                <span>TOTAL:</span>
+                <span>$` + fmt.Sprintf("%.2f", receipt.Total) + `</span>
+            </div>
+        </div>`
+
+    // Cash payment details
     if receipt.PaymentType == "cash" && receipt.CashGiven > 0 {
-        cmd.WriteString("----------------------------------------\n")
-        printTotalLine("Cash:", receipt.CashGiven, "$")
-        printTotalLine("Change:", receipt.ChangeDue, "$")
+        html += `
+        <div style="margin-top: 10px; background-color: #f8f8f8; padding: 5px;">
+            <div class="total-line">
+                <span>Cash:</span>
+                <span>$` + fmt.Sprintf("%.2f", receipt.CashGiven) + `</span>
+            </div>
+            <div class="total-line">
+                <span>Change:</span>
+                <span>$` + fmt.Sprintf("%.2f", receipt.ChangeDue) + `</span>
+            </div>
+        </div>`
     }
-    
-    // Center align for footer
-    cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1 - Center alignment
-    
-    // Print footer
-    cmd.WriteString("\nThank you for your purchase!\n")
-    cmd.WriteString("Visit us again at " + locationName + "\n\n\n")
-    
-    // Cut paper
-    cmd.Write([]byte{0x1D, 0x56, 0x41, 0x10}) // GS V A 16 (partial cut with feed)
-    
-    return cmd.Bytes(), nil
+
+    html += `
+        <div class="divider"></div>
+        
+        <div class="footer">
+            <div>Thank you for your purchase!</div>
+            <div>Visit us again at ` + locationName + `</div>
+        </div>
+    </div>
+</body>
+</html>`
+
+    return html, nil
 }
 
-// printReceipt handles the receipt printing functionality
-func printReceiptHandler(w http.ResponseWriter, r *http.Request, printerName string) {
-	// Only allow POST method
-	if r.Method != http.MethodPost {
-		writeJSONError(w, http.StatusMethodNotAllowed, errors.New("only POST method is allowed"))
-		return
-	}
-	
-	// Read the request body
-	body, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, errors.New("error reading request body"))
-		return
-	}
-	defer r.Body.Close()
-	
-	// Parse the JSON data
-	var receipt ReceiptData
-	if err := json.Unmarshal(body, &receipt); err != nil {
-		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("error parsing JSON data: %v", err))
-		return
-	}
-	
-	// Validate receipt - skip validation for 'noSale' type
-	if receipt.Type != "noSale" && receipt.TransactionID == "" {
-		writeJSONError(w, http.StatusBadRequest, errors.New("transaction ID is required"))
-		return
-	}
-	
-	// Set default copies if not specified
-	if receipt.Copies <= 0 {
-		receipt.Copies = 1
-	}
-	
-	// Generate ESC/POS commands
-	escposData, err := generateESCPOSCommands(receipt)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, errors.New("error generating ESC/POS commands"))
-		return
-	}
-	
-	// Create a temporary file for the ESC/POS data
-	tempFile, err := ioutil.TempFile("", "receipt-*.bin")
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, errors.New("error creating temporary file"))
-		return
-	}
-	defer os.Remove(tempFile.Name())
-	
-	// Write the ESC/POS data to the temporary file
-	if _, err := tempFile.Write(escposData); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, errors.New("error writing to temporary file"))
-		return
-	}
-	
-	// Close the temporary file
-	if err := tempFile.Close(); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, errors.New("error closing temporary file"))
-		return
-	}
-	
-	// Define the printer command based on the OS
-	var cmd *exec.Cmd
-	
-	successCount := 0
-	for i := 0; i < receipt.Copies; i++ {
-		if runtime.GOOS == "windows" {
-			// Windows: use PowerShell to send to the specified printer
-			cmd = exec.Command("powershell", "-Command", fmt.Sprintf("Get-Content -Path '%s' -Raw | Out-Printer -Name '%s'", tempFile.Name(), printerName))
-			fmt.Printf("Printing copy %d/%d using %s printer\n", i+1, receipt.Copies, printerName)
-		} else if runtime.GOOS == "darwin" {
-			// macOS: use lp command with specified printer
-			cmd = exec.Command("lp", "-d", printerName, tempFile.Name())
-			fmt.Printf("Printing copy %d/%d using %s printer\n", i+1, receipt.Copies, printerName)
-		} else {
-			// Linux: use lp command with specified printer
-			cmd = exec.Command("lp", "-d", printerName, tempFile.Name())
-			fmt.Printf("Printing copy %d/%d using %s printer\n", i+1, receipt.Copies, printerName)
-		}
-		
-		// Execute the command
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			log.Printf("Print error (copy %d/%d): %v - %s", i+1, receipt.Copies, err, string(output))
-			continue
-		}
-		successCount++
-		fmt.Printf("Successfully printed copy %d/%d\n", i+1, receipt.Copies)
-	}
-	
-	// Return response
-	if successCount > 0 {
-		resp := map[string]interface{}{
-			"status":  "success",
-			"message": fmt.Sprintf("Printed %d/%d copies successfully", successCount, receipt.Copies),
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	} else {
-		writeJSONError(w, http.StatusInternalServerError, errors.New("failed to print any copies"))
-	}
+// printHTMLReceiptHandler creates and prints a receipt using HTML
+func printHTMLReceiptHandler(w http.ResponseWriter, r *http.Request, printerName string) {
+    // Only allow POST method
+    if r.Method != http.MethodPost {
+        writeJSONError(w, http.StatusMethodNotAllowed, errors.New("only POST method is allowed"))
+        return
+    }
+    
+    // Read the request body
+    body, err := ioutil.ReadAll(r.Body)
+    if err != nil {
+        writeJSONError(w, http.StatusBadRequest, errors.New("error reading request body"))
+        return
+    }
+    defer r.Body.Close()
+    
+    // Parse the JSON data
+    var receipt ReceiptData
+    if err := json.Unmarshal(body, &receipt); err != nil {
+        writeJSONError(w, http.StatusBadRequest, fmt.Errorf("error parsing JSON data: %v", err))
+        return
+    }
+    
+    // Set default copies if not specified
+    if receipt.Copies <= 0 {
+        receipt.Copies = 1
+    }
+    
+    // Generate HTML receipt
+    htmlContent, err := generateHTMLReceipt(receipt)
+    if err != nil {
+        writeJSONError(w, http.StatusInternalServerError, errors.New("error generating HTML receipt"))
+        return
+    }
+    
+    // Create a temporary HTML file
+    tempFile, err := ioutil.TempFile("", "receipt-*.html")
+    if err != nil {
+        writeJSONError(w, http.StatusInternalServerError, errors.New("error creating temporary file"))
+        return
+    }
+    
+    tempFilePath := tempFile.Name()
+    defer os.Remove(tempFilePath)
+    
+    // Write the HTML content to the file
+    if _, err := tempFile.WriteString(htmlContent); err != nil {
+        writeJSONError(w, http.StatusInternalServerError, errors.New("error writing to temporary file"))
+        return
+    }
+    
+    // Close the file
+    if err := tempFile.Close(); err != nil {
+        writeJSONError(w, http.StatusInternalServerError, errors.New("error closing temporary file"))
+        return
+    }
+    
+    // Print the HTML file
+    successCount := 0
+    for i := 0; i < receipt.Copies; i++ {
+        var cmd *exec.Cmd
+        
+        if runtime.GOOS == "windows" {
+            // On Windows, use the default browser to print silently
+            cmd = exec.Command("powershell", "-Command", 
+                fmt.Sprintf("Start-Process \"$env:SystemRoot\\System32\\rundll32.exe\" -ArgumentList \"mshtml.dll,PrintHTML '%s'\" -WindowStyle Hidden", tempFilePath))
+        } else if runtime.GOOS == "darwin" {
+            // On macOS
+            cmd = exec.Command("lp", "-d", printerName, tempFilePath)
+        } else {
+            // On Linux
+            cmd = exec.Command("lp", "-d", printerName, tempFilePath)
+        }
+        
+        output, err := cmd.CombinedOutput()
+        if err != nil {
+            log.Printf("Print error (copy %d/%d): %v - %s", i+1, receipt.Copies, err, string(output))
+            continue
+        }
+        
+        successCount++
+        fmt.Printf("Successfully printed copy %d/%d\n", i+1, receipt.Copies)
+    }
+    
+    // Return response
+    if successCount > 0 {
+        resp := map[string]interface{}{
+            "status":  "success",
+            "message": fmt.Sprintf("Printed %d/%d copies successfully", successCount, receipt.Copies),
+        }
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(resp)
+    } else {
+        writeJSONError(w, http.StatusInternalServerError, errors.New("failed to print any copies"))
+    }
 }
+
 
 func main() {
 	scannerPortFlag := flag.String("scanner-port", "CON3", "Scanner port (e.g., CON3, CON4)")
@@ -958,12 +1204,13 @@ func main() {
 	
 	// Receipt printing endpoint - pass the printer name to the handler
 	mux.HandleFunc("/print/receipt", func(w http.ResponseWriter, r *http.Request) {
-		printReceiptHandler(w, r, *printerNameFlag)
+		printHTMLReceiptHandler(w, r, *printerNameFlag)
 	})
 	
 	log.Printf("Starting server on http://localhost:%d", *httpPortFlag)
 	log.Printf("Scanner endpoint: http://localhost:%d/scanner/scan", *httpPortFlag)
 	log.Printf("Receipt printer endpoint: http://localhost:%d/print/receipt", *httpPortFlag)
+	log.Printf("HTML receipt printer endpoint: http://localhost:%d/print/html-receipt", *httpPortFlag)
 	
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", *httpPortFlag), corsMiddleware(mux)); err != nil {
 		log.Fatal(err)
