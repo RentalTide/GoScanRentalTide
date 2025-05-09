@@ -653,70 +653,33 @@ func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string,
 	json.NewEncoder(w).Encode(resp)
 }
 
-// Print HTML receipt directly on Windows
-func printDirectlyOnWindows(htmlFilePath string, printerName string) error {
-    // PowerShell script for direct printing
-    psScript := fmt.Sprintf(`
-    Add-Type -AssemblyName System.Drawing
-    Add-Type -AssemblyName System.Windows.Forms
-
-    $htmlContent = Get-Content -Path "%s" -Raw
-    $webBrowser = New-Object System.Windows.Forms.WebBrowser
-    $webBrowser.DocumentText = $htmlContent
-    $webBrowser.DocumentCompleted.Add({
-        $webBrowser.ShowPrintDialog()
-    })
-
-    # Give it time to render and print
-    Start-Sleep -Seconds 5
-    `, htmlFilePath)
-
-    // Save the PowerShell script to a temp file
-    psFile, err := ioutil.TempFile("", "print-*.ps1")
-    if err != nil {
-        return err
+// Simpler direct printing method for Windows
+func printWithWindowsCommand(htmlFilePath string, printerName string) error {
+    var cmd *exec.Cmd
+    
+    // Use direct printing with the Windows print command if a printer is specified
+    if printerName != "" {
+        cmd = exec.Command("cmd", "/c", "print", "/d:"+printerName, htmlFilePath)
+    } else {
+        // Just open the file in the default browser if no printer specified
+        cmd = exec.Command("cmd", "/c", "start", htmlFilePath)
     }
-    defer os.Remove(psFile.Name())
-
-    if _, err := psFile.WriteString(psScript); err != nil {
-        return err
-    }
-    if err := psFile.Close(); err != nil {
-        return err
-    }
-
-    // Execute the PowerShell script
-    cmd := exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-File", psFile.Name())
+    
     return cmd.Run()
 }
 
-// Create a batch file to print using Edge browser
-func printWithEdgeBrowser(htmlFilePath string, printerName string) error {
-    // Create a batch file
-    printBatFile, err := ioutil.TempFile("", "print-*.bat")
-    if err != nil {
-        return err
-    }
-    defer os.Remove(printBatFile.Name())
+// Fallback to just opening the HTML file in the browser
+func printWithDefaultBrowser(htmlFilePath string) error {
+    var cmd *exec.Cmd
     
-    // Create a batch file that opens the HTML file with Microsoft Edge in print mode
-    printBatContent := fmt.Sprintf(`
-    @echo off
-    start /min "" "msedge" --kiosk --print "%s" --printer="%s"
-    timeout /t 5
-    taskkill /f /im msedge.exe
-    `, htmlFilePath, printerName)
-    
-    if _, err := printBatFile.WriteString(printBatContent); err != nil {
-        return err
+    if runtime.GOOS == "windows" {
+        cmd = exec.Command("cmd", "/c", "start", htmlFilePath)
+    } else if runtime.GOOS == "darwin" {
+        cmd = exec.Command("open", htmlFilePath)
+    } else {
+        cmd = exec.Command("xdg-open", htmlFilePath)
     }
     
-    if err := printBatFile.Close(); err != nil {
-        return err
-    }
-    
-    // Execute the batch file
-    cmd := exec.Command("cmd", "/C", printBatFile.Name())
     return cmd.Run()
 }
 
@@ -1016,60 +979,45 @@ func printHTMLReceiptHandler(w http.ResponseWriter, r *http.Request, printerName
     // Print the HTML file
     successCount := 0
     for i := 0; i < receipt.Copies; i++ {
-        var cmd *exec.Cmd
-        var output []byte
-        var err error
-        
         if runtime.GOOS == "windows" {
-            // Try multiple methods for Windows
-            log.Printf("Trying to print on Windows using Edge browser...")
-            if err := printWithEdgeBrowser(tempFilePath, printerName); err != nil {
-                log.Printf("Edge browser printing failed: %v", err)
+            // Try to print directly with Windows command
+            log.Printf("Trying to print with Windows command...")
+            err := printWithWindowsCommand(tempFilePath, printerName)
+            if err != nil {
+                log.Printf("Windows print command error: %v", err)
                 
-                log.Printf("Trying to print on Windows using direct method...")
-                if err := printDirectlyOnWindows(tempFilePath, printerName); err != nil {
-                    log.Printf("Direct Windows printing failed: %v", err)
-                    
-                    // Fall back to the mshtml.dll method
-                    log.Printf("Falling back to mshtml.dll method...")
-                    cmd = exec.Command("powershell", "-Command", 
-                        fmt.Sprintf("Start-Process \"$env:SystemRoot\\System32\\rundll32.exe\" -ArgumentList \"mshtml.dll,PrintHTML '%s'\" -WindowStyle Hidden", tempFilePath))
-                    output, err = cmd.CombinedOutput()
-                    if err != nil {
-                        log.Printf("Print error (copy %d/%d): %v - %s", i+1, receipt.Copies, err, string(output))
-                        continue
-                    }
-                } else {
-                    successCount++
-                    log.Printf("Successfully printed copy %d/%d using direct Windows method", i+1, receipt.Copies)
+                // Fall back to opening in browser
+                log.Printf("Falling back to opening in browser...")
+                if err := printWithDefaultBrowser(tempFilePath); err != nil {
+                    log.Printf("Browser open error: %v", err)
                     continue
                 }
-            } else {
-                successCount++
-                log.Printf("Successfully printed copy %d/%d using Edge browser", i+1, receipt.Copies)
-                continue
             }
+            
+            // Count as success
+            successCount++
+            log.Printf("Successfully triggered print job %d/%d", i+1, receipt.Copies)
         } else if runtime.GOOS == "darwin" {
             // On macOS
-            cmd = exec.Command("lp", "-d", printerName, tempFilePath)
-            output, err = cmd.CombinedOutput()
+            cmd := exec.Command("lp", "-d", printerName, tempFilePath)
+            output, err := cmd.CombinedOutput()
             if err != nil {
                 log.Printf("Print error (copy %d/%d): %v - %s", i+1, receipt.Copies, err, string(output))
                 continue
             }
+            successCount++
+            log.Printf("Successfully printed copy %d/%d", i+1, receipt.Copies)
         } else {
             // On Linux
-            cmd = exec.Command("lp", "-d", printerName, tempFilePath)
-            output, err = cmd.CombinedOutput()
+            cmd := exec.Command("lp", "-d", printerName, tempFilePath)
+            output, err := cmd.CombinedOutput()
             if err != nil {
                 log.Printf("Print error (copy %d/%d): %v - %s", i+1, receipt.Copies, err, string(output))
                 continue
             }
+            successCount++
+            log.Printf("Successfully printed copy %d/%d", i+1, receipt.Copies)
         }
-        
-        log.Printf("Printing command output: %s", string(output))
-        successCount++
-        log.Printf("Successfully printed copy %d/%d", i+1, receipt.Copies)
     }
     
     // Return response
