@@ -493,7 +493,7 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 	}
 
 	var responseBuffer bytes.Buffer
-	maxWaitTime := 15 * time.Second  // Maximum overall wait time
+	maxWaitTime := 5 * time.Second  // Maximum overall wait time
 	maxDataWaitTime := 3 * time.Second // Maximum wait time after receiving data
 	deadline := time.Now().Add(maxWaitTime)
 	tmp := make([]byte, 128)
