@@ -344,7 +344,14 @@ const receiptTemplate = `
 
 // ensureAppDirectory creates and returns the application's dedicated directory
 func ensureAppDirectory() (string, error) {
-    appDir := filepath.Join("C:", "GoScanRentalTide-main")
+    var appDir string
+    if runtime.GOOS == "windows" {
+        // On Windows, ensure we have a backslash after the drive letter
+        appDir = "C:\\GoScanRentalTide-main"
+    } else {
+        // On other systems, use standard path joining
+        appDir = filepath.Join("/", "opt", "GoScanRentalTide-main")
+    }
     
     // Create directories if they don't exist
     if err := os.MkdirAll(appDir, 0755); err != nil {
@@ -915,8 +922,30 @@ func printReceipt(receipt ReceiptData, printerName string) error {
     
     // Create temporary file paths in our app directory
     timestamp := time.Now().Format("20060102-150405")
-    htmlPath := filepath.Join(appDir, "temp", fmt.Sprintf("receipt-%s.html", timestamp))
-    pdfPath := filepath.Join(appDir, "temp", fmt.Sprintf("receipt-%s.pdf", timestamp))
+    var htmlPath, pdfPath string
+    
+    if runtime.GOOS == "windows" {
+        // Use proper Windows path format
+        htmlPath = filepath.Join(appDir, "temp", fmt.Sprintf("receipt-%s.html", timestamp))
+        pdfPath = filepath.Join(appDir, "temp", fmt.Sprintf("receipt-%s.pdf", timestamp))
+        
+        // Ensure paths are using Windows backslashes
+        htmlPath = strings.ReplaceAll(htmlPath, "/", "\\")
+        pdfPath = strings.ReplaceAll(pdfPath, "/", "\\")
+        
+        // Double-check to ensure the directory exists
+        tempDir := filepath.Join(appDir, "temp")
+        if err := os.MkdirAll(tempDir, 0755); err != nil {
+            return fmt.Errorf("error ensuring temp directory exists: %v", err)
+        }
+        
+        // Log the exact paths
+        log.Printf("Windows file paths: HTML=%s, PDF=%s", htmlPath, pdfPath)
+    } else {
+        // Unix-style paths
+        htmlPath = filepath.Join(appDir, "temp", fmt.Sprintf("receipt-%s.html", timestamp))
+        pdfPath = filepath.Join(appDir, "temp", fmt.Sprintf("receipt-%s.pdf", timestamp))
+    }
     
     // Write HTML to file
     if err := ioutil.WriteFile(htmlPath, []byte(html), 0644); err != nil {
@@ -1011,11 +1040,25 @@ PrintPDF:
     // Print the PDF silently based on OS
     if runtime.GOOS == "windows" {
         // Windows: use PowerShell to print silently
-        psCommand := fmt.Sprintf("Start-Process -FilePath \"%s\" -Verb Print -PassThru | %%{ sleep 2; $_.CloseMainWindow() }", pdfPath)
+        // Ensure we have proper Windows path format with double backslashes
+        windowsPdfPath := strings.ReplaceAll(pdfPath, "/", "\\")
+        
+        // Ensure file exists before trying to print
+        if _, err := os.Stat(pdfPath); os.IsNotExist(err) {
+            return fmt.Errorf("PDF file not found at path: %s", pdfPath)
+        }
+        
+        log.Printf("PDF file exists, preparing to print: %s", pdfPath)
+        
+        // Add quotes to handle paths with spaces
+        psCommand := fmt.Sprintf("Start-Process -FilePath '%s' -Verb Print -PassThru | %%{ sleep 2; $_.CloseMainWindow() }", windowsPdfPath)
         if printerName != "" {
             // If printer name is specified, use it
-            psCommand = fmt.Sprintf("Start-Process -FilePath \"%s\" -Verb PrintTo -ArgumentList '\"%s\"' -PassThru | %%{ sleep 2; $_.CloseMainWindow() }", pdfPath, printerName)
+            psCommand = fmt.Sprintf("Start-Process -FilePath '%s' -Verb PrintTo -ArgumentList '\"%s\"' -PassThru | %%{ sleep 2; $_.CloseMainWindow() }", windowsPdfPath, printerName)
         }
+        
+        log.Printf("PowerShell command: %s", psCommand)
+        
         cmd = exec.Command("powershell", "-Command", psCommand)
         fmt.Printf("Printing PDF using PowerShell to printer: %s\n", printerName)
         log.Printf("Printing PDF using PowerShell to printer: %s\n", printerName)
@@ -1033,8 +1076,85 @@ PrintPDF:
 
     output, err = cmd.CombinedOutput()
     if err != nil {
-        log.Printf("Printing error: %v\n%s", err, string(output))
-        return fmt.Errorf("error printing PDF: %v\nOutput: %s", err, string(output))
+        log.Printf("PowerShell printing error: %v\n%s", err, string(output))
+        
+        // Try alternative printing method using SumatraPDF if available
+        log.Printf("Trying alternative printing method (SumatraPDF)...")
+        
+        // Check common locations for SumatraPDF
+        sumatraPaths := []string{
+            "C:\\Program Files\\SumatraPDF\\SumatraPDF.exe",
+            "C:\\Program Files (x86)\\SumatraPDF\\SumatraPDF.exe",
+        }
+        
+        var sumatraPath string
+        for _, path := range sumatraPaths {
+            if _, err := os.Stat(path); err == nil {
+                sumatraPath = path
+                break
+            }
+        }
+        
+        if sumatraPath != "" {
+            // SumatraPDF found, try to print with it
+            windowsPdfPath := strings.ReplaceAll(pdfPath, "/", "\\")
+            var sumatraCmd *exec.Cmd
+            
+            if printerName != "" {
+                sumatraCmd = exec.Command(sumatraPath, "-print-to", printerName, "-silent", windowsPdfPath)
+            } else {
+                sumatraCmd = exec.Command(sumatraPath, "-print-to-default", "-silent", windowsPdfPath)
+            }
+            
+            log.Printf("Printing with SumatraPDF: %s", sumatraPath)
+            sumatraOutput, sumatraErr := sumatraCmd.CombinedOutput()
+            
+            if sumatraErr == nil {
+                log.Printf("Successfully printed with SumatraPDF")
+                fmt.Printf("Successfully printed receipt using SumatraPDF\n")
+                return nil
+            } else {
+                log.Printf("SumatraPDF printing error: %v\n%s", sumatraErr, string(sumatraOutput))
+            }
+        }
+        
+        // If we get here, both printing methods failed
+        // Try a third option: direct system print command
+        log.Printf("Trying system print command...")
+        
+        sysCmd := exec.Command("cmd", "/c", "print", strings.ReplaceAll(pdfPath, "/", "\\"))
+        sysOutput, sysErr := sysCmd.CombinedOutput()
+        
+        if sysErr == nil {
+            log.Printf("Successfully printed with system print command")
+            fmt.Printf("Successfully printed receipt using system command\n")
+            return nil
+        } else {
+            log.Printf("System print command error: %v\n%s", sysErr, string(sysOutput))
+        }
+        
+        // All printing methods failed, try to open the PDF directly
+        log.Printf("All printing methods failed. Attempting to open PDF directly...")
+        
+        // Try to open the PDF with the default application
+        var openCmd *exec.Cmd
+        if runtime.GOOS == "windows" {
+            openCmd = exec.Command("cmd", "/c", "start", "", pdfPath)
+        } else if runtime.GOOS == "darwin" {
+            openCmd = exec.Command("open", pdfPath)
+        } else {
+            openCmd = exec.Command("xdg-open", pdfPath)
+        }
+        
+        openErr := openCmd.Start()
+        if openErr == nil {
+            log.Printf("Opened PDF file directly for manual printing")
+            return fmt.Errorf("automatic printing failed, opened PDF for manual printing: %v", err)
+        }
+        
+        // Truly everything failed
+        log.Printf("Could not open PDF: %v", openErr)
+        return fmt.Errorf("all printing methods failed. PDF saved at: %s", pdfPath)
     }
 
     fmt.Printf("Successfully printed receipt\n")
