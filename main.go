@@ -114,12 +114,12 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 	// Always use 1200 baud for COM4
 	if strings.ToUpper(portName) == "COM4" {
 		mode = &serial.Mode{
-			BaudRate: 1200,
-			DataBits: 7,
+			BaudRate:   1200,
+			DataBits: 8,
 			Parity:   serial.NoParity,
 			StopBits: serial.OneStopBit,
 		}
-		fmt.Println("Using COM4 settings: BaudRate=1200, DataBits=7")
+		fmt.Println("Using COM4 settings: BaudRate=1200, DataBits=8")
 	} else if useMacSettings {
 		// Use settings from the Mac version for other ports
 		mode = &serial.Mode{
@@ -158,14 +158,14 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 	}
 
 	var responseBuffer strings.Builder
-	maxWaitTime := 5 * time.Second  // Maximum overall wait time
-	maxDataWaitTime := 3 * time.Second // Maximum wait time after receiving data
+	maxWaitTime := 3 * time.Second  // Maximum overall wait time (reduced from 5)
+	maxDataWaitTime := 1 * time.Second // Maximum wait time after receiving data (reduced from 3)
 	deadline := time.Now().Add(maxWaitTime)
 	tmp := make([]byte, 128)
 
 	fmt.Printf("Waiting for response... (timeout: %v, max wait: %v, max data wait: %v)\n", 
 		readTimeout, maxWaitTime, maxDataWaitTime)
-	fmt.Println("PLEASE SCAN YOUR LICENSE NOW - You have 10 seconds")
+	fmt.Println("PLEASE SCAN YOUR LICENSE NOW - You have 5 seconds") // Reduced from 10
 	
 	hasReceivedData := false
 	firstDataTime := time.Time{}
