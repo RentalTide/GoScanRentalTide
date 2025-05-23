@@ -1,38 +1,28 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
-
+	"flag"
+	"io/ioutil"
 	"go.bug.st/serial"
 )
 
-// SerialResponse represents the response sent to the frontend
-type SerialResponse struct {
-	Status    string `json:"status"`
-	RawData   string `json:"rawData"`
-	RawHex    string `json:"rawHex"`
-	Message   string `json:"message,omitempty"`
-	Timestamp string `json:"timestamp"`
-	
-	// Parsed license data - populated if parsing is successful
-	ParsedData *LicenseData `json:"parsedData,omitempty"`
-}
-
-// LicenseData represents the structured data from a parsed license
+// LicenseData type for driver's license data
 type LicenseData struct {
 	FirstName     string `json:"firstName"`
-	MiddleName    string `json:"middleName,omitempty"`
+	MiddleName    string `json:"middleName"`
 	LastName      string `json:"lastName"`
 	Address       string `json:"address"`
 	City          string `json:"city"`
@@ -44,32 +34,287 @@ type LicenseData struct {
 	Height        string `json:"height"`
 	Sex           string `json:"sex"`
 	LicenseClass  string `json:"licenseClass"`
-	DOB           string `json:"dob"`
-	Weight        string `json:"weight,omitempty"`
-	HairColor     string `json:"hairColor,omitempty"`
-	EyeColor      string `json:"eyeColor,omitempty"`
+	Dob           string `json:"dob"`
+	RawData       string `json:"rawData,omitempty"` // Added to show raw data for debugging
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusOK)
-			return
+// Receipt Item represents an item on a receipt
+type ReceiptItem struct {
+	Name     string  `json:"name"`
+	Quantity int     `json:"quantity"`
+	Price    float64 `json:"price"`
+	SKU      string  `json:"sku,omitempty"`
+}
+
+// ReceiptData represents the data for a receipt
+type ReceiptData struct {
+	TransactionID      string        `json:"transactionId"`
+	Items              []ReceiptItem `json:"items"`
+	Subtotal           float64       `json:"subtotal"`
+	Tax                float64       `json:"tax"`
+	Total              float64       `json:"total"`
+	Tip                float64       `json:"tip,omitempty"`
+	CustomerName       string        `json:"customerName,omitempty"`
+	Date               string        `json:"date"`
+	Location           interface{}   `json:"location"` // Can be a string or an object with a name field
+	PaymentType        string        `json:"paymentType"`
+	RefundAmount       float64       `json:"refundAmount,omitempty"`
+	DiscountAmount     float64       `json:"discountAmount,omitempty"`
+	DiscountPercentage float64       `json:"discountPercentage,omitempty"`
+	CashGiven          float64       `json:"cashGiven,omitempty"`
+	ChangeDue          float64       `json:"changeDue,omitempty"`
+	Copies             int           `json:"copies"`
+	Type               string        `json:"type,omitempty"`      // Added for 'noSale' type
+	Timestamp          string        `json:"timestamp,omitempty"` // Added for timestamp
+}
+
+func parseBCLicenseData(raw string) LicenseData {
+	fmt.Println("Parsing BC license data from raw input:")
+	fmt.Println(raw)
+
+	license := LicenseData{
+		RawData:      raw,
+		LicenseClass: "NA",
+	}
+
+	// Clean control characters
+	raw = strings.TrimPrefix(raw, "\x15")
+	raw = strings.ReplaceAll(raw, "\r", "")
+	raw = strings.ReplaceAll(raw, "\n", "")
+
+	parts := strings.Split(raw, "^")
+
+	// City
+	if len(parts) >= 1 && strings.HasPrefix(parts[0], "%BC") {
+		license.City = strings.TrimSpace(strings.TrimPrefix(parts[0], "%BC"))
+	}
+
+	// Name
+	if len(parts) >= 2 {
+		nameParts := strings.Split(parts[1], ",")
+		if len(nameParts) >= 2 {
+			license.LastName = strings.TrimSpace(strings.TrimPrefix(nameParts[0], "$"))
+			fullName := strings.TrimSpace(strings.TrimPrefix(nameParts[1], "$"))
+			fnParts := strings.SplitN(fullName, " ", 2)
+			license.FirstName = fnParts[0]
+			if len(fnParts) > 1 {
+				license.MiddleName = fnParts[1]
+			}
 		}
-		next.ServeHTTP(w, r)
-	})
+	}
+
+	// Address, Province, Postal
+	if len(parts) >= 3 {
+		addressPart := parts[2]
+		if strings.Contains(addressPart, "$") {
+			addressParts := strings.Split(addressPart, "$")
+			license.Address = strings.TrimSpace(addressParts[0])
+
+			if len(addressParts) > 1 {
+				statePostalPart := strings.TrimSpace(addressParts[1])
+				if strings.Contains(statePostalPart, "BC") {
+					license.State = "BC"
+				}
+				postalRegex := regexp.MustCompile(`[A-Z]\d[A-Z]\s?\d[A-Z]\d`)
+				if match := postalRegex.FindString(statePostalPart); match != "" {
+					license.Postal = match
+				}
+			}
+		} else {
+			license.Address = strings.TrimSpace(addressPart)
+		}
+	}
+
+	// License number
+// License number: extract last 7 digits after semicolon
+licenseNumMatch := regexp.MustCompile(`;(\d{13,16})=`).FindStringSubmatch(raw)
+if len(licenseNumMatch) > 1 {
+    full := licenseNumMatch[1]
+    if len(full) >= 7 {
+        license.LicenseNumber = full[len(full)-7:]
+    }
 }
 
-func writeJSONError(w http.ResponseWriter, status int, err error) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{
-		"status":  "error",
-		"message": err.Error(),
-	})
+
+	// Dates from =271220021204=
+	dateMatch := regexp.MustCompile(`=(\d{12})=`).FindStringSubmatch(raw)
+	if len(dateMatch) > 1 {
+		dateStr := dateMatch[1]
+
+		// Expiry: first 6 digits
+		expiryDay := dateStr[0:2]
+		expiryMonth := dateStr[2:4]
+		expiryYear := "20" + dateStr[4:6]
+
+		// DOB: next 6 digits
+		dobYear := "20" + dateStr[6:8]
+		dobMonth := dateStr[8:10]
+		dobDay := dateStr[10:12]
+
+		license.ExpiryDate = fmt.Sprintf("%s-%s-%s", expiryYear, expiryMonth, expiryDay)
+		license.Dob = fmt.Sprintf("%s-%s-%s", dobYear, dobMonth, dobDay)
+	}
+
+	// Sex and Height
+	sexHeight := regexp.MustCompile(`([MF])(\d{3})`).FindStringSubmatch(raw)
+	if len(sexHeight) == 3 {
+		license.Sex = sexHeight[1]
+		license.Height = sexHeight[2] + "cm"
+	}
+
+	return license
+}
+
+
+// Original AAMVA format parser for other jurisdictions
+func parseAAMVALicenseData(raw string) LicenseData {
+	fmt.Println("Parsing AAMVA license data from raw input:")
+	fmt.Println(raw)
+	
+	// Remove any NAK (0x15) character at the beginning
+	raw = strings.TrimPrefix(raw, "\x15")
+	
+	lines := strings.Split(raw, "\n")
+	var parsedLines []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			parsedLines = append(parsedLines, trimmed)
+			fmt.Println("Parsed line:", trimmed)
+		}
+	}
+
+	data := make(map[string]string)
+	var licenseClass string
+
+	for _, line := range parsedLines {
+		switch {
+		case strings.HasPrefix(line, "DCS"):
+			data["lastName"] = strings.TrimSpace(line[3:])
+			fmt.Println("Found lastName:", data["lastName"])
+		case strings.HasPrefix(line, "DAC"):
+			data["firstName"] = strings.TrimSpace(line[3:])
+			fmt.Println("Found firstName:", data["firstName"])
+		case strings.HasPrefix(line, "DAD"):
+			data["middleName"] = strings.TrimSpace(line[3:])
+			fmt.Println("Found middleName:", data["middleName"])
+		case strings.HasPrefix(line, "DBA"):
+			d := strings.TrimSpace(line[3:])
+			if len(d) >= 8 {
+				data["expiryDate"] = fmt.Sprintf("%s/%s/%s", d[0:4], d[4:6], d[6:8])
+				fmt.Println("Found expiryDate:", data["expiryDate"])
+			}
+		case strings.HasPrefix(line, "DBD"):
+			d := strings.TrimSpace(line[3:])
+			if len(d) >= 8 {
+				data["issueDate"] = fmt.Sprintf("%s/%s/%s", d[0:4], d[4:6], d[6:8])
+				fmt.Println("Found issueDate:", data["issueDate"])
+			}
+		case strings.HasPrefix(line, "DBB"):
+			d := strings.TrimSpace(line[3:])
+			if len(d) >= 8 {
+				data["dob"] = fmt.Sprintf("%s/%s/%s", d[0:4], d[4:6], d[6:8])
+				fmt.Println("Found dob:", data["dob"])
+			}
+		case strings.HasPrefix(line, "DBC"):
+			s := strings.TrimSpace(line[3:])
+			if s == "1" {
+				data["sex"] = "M"
+			} else if s == "2" {
+				data["sex"] = "F"
+			} else {
+				data["sex"] = s
+			}
+			fmt.Println("Found sex:", data["sex"])
+		case strings.HasPrefix(line, "DAU"):
+			data["height"] = strings.ReplaceAll(strings.TrimSpace(line[3:]), " ", "")
+			fmt.Println("Found height:", data["height"])
+		case strings.HasPrefix(line, "DAG"):
+			data["address"] = strings.TrimSpace(line[3:])
+			fmt.Println("Found address:", data["address"])
+		case strings.HasPrefix(line, "DAI"):
+			data["city"] = strings.TrimSpace(line[3:])
+			fmt.Println("Found city:", data["city"])
+		case strings.HasPrefix(line, "DAJ"):
+			data["state"] = strings.TrimSpace(line[3:])
+			fmt.Println("Found state:", data["state"])
+		case strings.HasPrefix(line, "DAK"):
+			data["postal"] = strings.TrimSpace(line[3:])
+			fmt.Println("Found postal:", data["postal"])
+		case strings.HasPrefix(line, "DCF"):
+			data["licenseNumber"] = strings.TrimSpace(line[3:])
+			fmt.Println("Found licenseNumber (DCF):", data["licenseNumber"])
+		
+		case strings.HasPrefix(line, "DAQ"):
+			if _, exists := data["licenseNumber"]; !exists {
+				data["licenseNumber"] = strings.TrimSpace(line[3:])
+				fmt.Println("Found licenseNumber (DAQ fallback):", data["licenseNumber"])
+			}
+		
+		}
+
+		if strings.Contains(line, "DCAG") {
+			re := regexp.MustCompile(`DCAG(\w+)`)
+			matches := re.FindStringSubmatch(line)
+			if len(matches) > 1 {
+				licenseClass = matches[1]
+				fmt.Println("Found licenseClass:", licenseClass)
+			}
+		}
+	}
+
+	if licenseClass == "" {
+		licenseClass = "NA"
+	}
+
+	return LicenseData{
+		FirstName:     data["firstName"],
+		MiddleName:    data["middleName"],
+		LastName:      data["lastName"],
+		Address:       data["address"],
+		City:          data["city"],
+		State:         data["state"],
+		Postal:        data["postal"],
+		LicenseNumber: data["licenseNumber"],
+		IssueDate:     data["issueDate"],
+		ExpiryDate:    data["expiryDate"],
+		Height:        data["height"],
+		Sex:           data["sex"],
+		LicenseClass:  licenseClass,
+		Dob:           data["dob"],
+		RawData:       raw,
+	}
+}
+
+// Main parser that determines which format to use
+func parseLicenseData(raw string) LicenseData {
+	// Remove any NAK (0x15) character from the beginning for format detection
+	cleanRaw := strings.TrimPrefix(raw, "\x15")
+	
+	// Determine the format of the license data
+	if strings.Contains(cleanRaw, "%BC") {
+		// This is a BC driver's license format
+		return parseBCLicenseData(raw)
+	} else if strings.Contains(cleanRaw, "%AB") {
+		// This is an Alberta driver's license (also uses BC format parser)
+		return parseBCLicenseData(raw)
+	} else if strings.Contains(cleanRaw, "ANSI ") {
+		// This is an AAMVA format license
+		return parseAAMVALicenseData(raw)
+	} else if strings.Contains(cleanRaw, "DCS") || strings.Contains(cleanRaw, "DAQ") {
+		// This is likely an AAMVA format license
+		return parseAAMVALicenseData(raw)
+	} else {
+		// Try BC format by default
+		license := parseBCLicenseData(raw)
+		
+		// If we couldn't extract basic info, try AAMVA as a fallback
+		if license.FirstName == "" && license.LastName == "" && license.LicenseNumber == "" {
+			return parseAAMVALicenseData(raw)
+		}
+		
+		return license
+	}
 }
 
 func findScannerPort(portOverride string) (string, error) {
@@ -136,18 +381,8 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 	}
 
 	var mode *serial.Mode
-	
-	// Always use 1200 baud for COM4
-	if strings.ToUpper(portName) == "COM4" {
-		mode = &serial.Mode{
-			BaudRate:   1200,
-			DataBits: 8,
-			Parity:   serial.NoParity,
-			StopBits: serial.OneStopBit,
-		}
-		fmt.Println("Using COM4 settings: BaudRate=1200, DataBits=8")
-	} else if useMacSettings {
-		// Use settings from the Mac version for other ports
+	if useMacSettings {
+		// Use settings from the Mac version
 		mode = &serial.Mode{
 			BaudRate: 9600,
 			DataBits: 8,
@@ -156,7 +391,7 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 		}
 		fmt.Println("Using Mac settings: BaudRate=9600, DataBits=8")
 	} else {
-		// Default Windows settings for other ports
+		// Use settings for Windows COM4
 		mode = &serial.Mode{
 			BaudRate: 1200,
 			DataBits: 7,
@@ -183,32 +418,25 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 		return "", err
 	}
 
-	var responseBuffer strings.Builder
-	maxWaitTime := 3 * time.Second  // Maximum overall wait time (reduced from 5)
-	maxDataWaitTime := 1 * time.Second // Maximum wait time after receiving data (reduced from 3)
+	var responseBuffer bytes.Buffer
+	maxWaitTime := 3 * time.Second  // Maximum overall wait time
 	deadline := time.Now().Add(maxWaitTime)
 	tmp := make([]byte, 128)
 
-	fmt.Printf("Waiting for response... (timeout: %v, max wait: %v, max data wait: %v)\n", 
-		readTimeout, maxWaitTime, maxDataWaitTime)
-	fmt.Println("PLEASE SCAN YOUR LICENSE NOW - You have 5 seconds") // Reduced from 10
+	fmt.Printf("Waiting for response... (timeout: %v, max wait: %v)\n", 
+		readTimeout, maxWaitTime)
+	fmt.Println("PLEASE SCAN YOUR LICENSE NOW - You have 10 seconds")
 	
 	hasReceivedData := false
-	firstDataTime := time.Time{}
 
 	for time.Now().Before(deadline) {
-		n, err := readWithTimeout(port, tmp, readTimeout)
+		n, err := readWithTimeout(port, tmp, 3*time.Second)
 		if err != nil {
 			if err.Error() == "read timeout" {
 				// If we've received some data but hit a timeout, consider it complete
 				if hasReceivedData {
-					// Check if we've waited at least 3 seconds since first data
-					if time.Since(firstDataTime) >= maxDataWaitTime {
-						fmt.Println("Max data wait time reached")
-						break
-					}
-					fmt.Println("Read timeout after receiving data, still waiting for more data...")
-					continue
+					fmt.Println("Read timeout reached after receiving data")
+					break
 				}
 				// Otherwise keep waiting until the overall deadline
 				fmt.Println("Read timeout, still waiting for scan...")
@@ -217,13 +445,7 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 			return "", err
 		}
 		
-		// If this is the first data we've received, record the time
-		if !hasReceivedData {
-			hasReceivedData = true
-			firstDataTime = time.Now()
-		}
-		
-		// Add the received bytes to our response buffer
+		hasReceivedData = true
 		responseBuffer.Write(tmp[:n])
 		
 		// Enhanced debugging of received data
@@ -239,12 +461,6 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 			}
 		}
 		fmt.Printf("Received %d bytes (human-readable): %s\n", n, readable)
-		
-		// If we've been receiving data for more than maxDataWaitTime seconds, stop
-		if time.Since(firstDataTime) >= maxDataWaitTime {
-			fmt.Println("Max data wait time reached")
-			break
-		}
 	}
 	
 	if !hasReceivedData {
@@ -253,391 +469,33 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 	
 	result := responseBuffer.String()
 	fmt.Println("===== COMPLETE RESPONSE =====")
-	fmt.Printf("Raw response (hex): %s\n", hex.EncodeToString([]byte(result)))
+	fmt.Printf("Raw response (hex): %s\n", hex.EncodeToString(responseBuffer.Bytes()))
 	fmt.Printf("Raw response (string): %q\n", result)
 	fmt.Println("===== END RESPONSE =====")
 	
 	return result, nil
 }
 
-// parseCanadianLicense parses Canadian driver's license data
-func parseCanadianLicense(raw string) *LicenseData {
-	log.Println("Parsing Canadian license data")
-	
-	// Create a new license data struct
-	license := &LicenseData{
-		LicenseClass: "NA", // Default license class
-	}
-	
-	// Remove any NAK (0x15) or control characters from the beginning
-	raw = strings.Replace(raw, "\x15", "", 1)
-	
-	// Clean up the data
-	raw = strings.Replace(raw, "\r", "", -1)
-	raw = strings.Replace(raw, "\n", "", -1)
-	
-	// Extract license number - looking for pattern: ;(\d+)=
-	licenseNumberMatch := regexp.MustCompile(`;(\d+)=`).FindStringSubmatch(raw)
-	if len(licenseNumberMatch) > 1 {
-		fullLicenseNumber := licenseNumberMatch[1]
-		
-		// BC pattern is often that the last 7 digits are the actual license number
-		if len(fullLicenseNumber) > 7 {
-			license.LicenseNumber = fullLicenseNumber[len(fullLicenseNumber)-7:]
-		} else {
-			license.LicenseNumber = fullLicenseNumber
-		}
-		
-		log.Println("Found license number:", license.LicenseNumber)
-	}
-	
-	// Determine province format
-	province := "UNKNOWN"
-	
-	// Check for province identifiers in the data
-	if strings.Contains(raw, "%BC") {
-		province = "BC"
-	} else if strings.Contains(raw, "%AB") {
-		province = "AB"
-	} else if strings.Contains(raw, "%ON") {
-		province = "ON"
-	} else if strings.Contains(raw, "%QC") {
-		province = "QC"
-	} else if strings.Contains(raw, "%MB") {
-		province = "MB"
-	} else if strings.Contains(raw, "%SK") {
-		province = "SK"
-	} else if strings.Contains(raw, "%NS") {
-		province = "NS"
-	} else if strings.Contains(raw, "%NB") {
-		province = "NB"
-	} else if strings.Contains(raw, "%PE") {
-		province = "PE"
-	} else if strings.Contains(raw, "%NL") {
-		province = "NL"
-	} else if strings.Contains(raw, "%YT") {
-		province = "YT"
-	} else if strings.Contains(raw, "%NT") {
-		province = "NT"
-	} else if strings.Contains(raw, "%NU") {
-		province = "NU"
-	}
-	
-	license.State = province
-	log.Printf("Detected province: %s", province)
-	
-	// Split by carets (^) - common in many Canadian DL formats
-	parts := strings.Split(raw, "^")
-	
-	// Extract city from first part (after %BC)
-	if len(parts) >= 1 && strings.Contains(parts[0], "%BC") {
-		cityPart := strings.Replace(parts[0], "%BC", "", 1)
-		license.City = strings.TrimSpace(cityPart)
-		log.Println("Found city:", license.City)
-	}
-	
-	// Extract name from second part
-	if len(parts) >= 2 {
-		nameParts := strings.Split(parts[1], ",")
-		if len(nameParts) >= 2 {
-			// Last name is before the comma
-			license.LastName = strings.TrimSpace(strings.Replace(nameParts[0], "$", "", 1))
-			
-			// First name and middle name after the comma
-			fullNamePart := strings.TrimSpace(nameParts[1])
-			// Remove the $ at the beginning if present
-			fullNamePart = strings.Replace(fullNamePart, "$", "", 1)
-			
-			// Check for middle name (split on space)
-			firstNameParts := strings.Split(fullNamePart, " ")
-			if len(firstNameParts) > 1 {
-				license.FirstName = strings.TrimSpace(firstNameParts[0])
-				license.MiddleName = strings.TrimSpace(strings.Join(firstNameParts[1:], " "))
-			} else {
-				license.FirstName = fullNamePart
-			}
-			
-			log.Printf("Found name: %s %s %s", license.FirstName, license.MiddleName, license.LastName)
-		}
-	}
-	
-	// Extract address, province, postal code from third part
-	if len(parts) >= 3 {
-		addressPart := parts[2]
-		
-		// Check if the address has a $ separator
-		if strings.Contains(addressPart, "$") {
-			addressParts := strings.Split(addressPart, "$")
-			
-			// First part is the street address
-			if len(addressParts) >= 1 {
-				license.Address = strings.TrimSpace(addressParts[0])
-				log.Println("Found address:", license.Address)
-			}
-			
-			// Second part might contain city, province, postal code
-			if len(addressParts) >= 2 {
-				addressLine2 := strings.TrimSpace(addressParts[1])
-				
-				// Extract postal code - Look for pattern like V1W 5B8 or V1W5B8
-				postalMatch := regexp.MustCompile(`([A-Z]\d[A-Z])\s*(\d[A-Z]\d)`).FindStringSubmatch(addressLine2)
-				if len(postalMatch) > 2 {
-					license.Postal = postalMatch[1] + postalMatch[2]
-					log.Println("Found postal code from address line 2:", license.Postal)
-				}
-				
-				// If we still don't have a postal code, look elsewhere in the raw data
-				if license.Postal == "" {
-					// Try other patterns
-					bcPostalMatch := regexp.MustCompile(`\b(V\d[A-Z]\d[A-Z]\d)\b`).FindStringSubmatch(raw)
-					if len(bcPostalMatch) > 1 {
-						license.Postal = bcPostalMatch[1]
-						log.Println("Found BC postal code:", license.Postal)
-					}
-				}
-			}
-		} else {
-			// If no $ separator, just use the whole part as address
-			license.Address = strings.TrimSpace(addressPart)
-			log.Println("Found address (no separator):", license.Address)
-		}
-	}
-	
-	// Extract dates - Look for pattern like =DDMMYYYYMMDD=
-	dateMatch := regexp.MustCompile(`=(\d{12})=`).FindStringSubmatch(raw)
-	if len(dateMatch) > 1 && len(dateMatch[1]) == 12 {
-		dateStr := dateMatch[1]
-		
-		// First 6 digits are expiry date (DDMMYY)
-		expiryDay := dateStr[0:2]
-		expiryMonth := dateStr[2:4]
-		expiryYear := dateStr[4:6]
-		
-		// Last 6 digits are birth date (YYMMDD)
-		birthYear := dateStr[6:8]
-		birthMonth := dateStr[8:10]
-		birthDay := dateStr[10:12]
-		
-		// Add century for birth year
-		fullBirthYear := ""
-		birthYearNum, _ := strconv.Atoi(birthYear)
-		currentYear := time.Now().Year() % 100
-		if birthYearNum > currentYear {
-			fullBirthYear = "19" + birthYear
-		} else {
-			fullBirthYear = "20" + birthYear
-		}
-		
-		// Format birth date
-		license.DOB = fmt.Sprintf("%s%s%s", fullBirthYear, birthMonth, birthDay)
-		log.Println("Found DOB:", license.DOB)
-		
-		// Format expiry date
-		license.ExpiryDate = fmt.Sprintf("20%s-%s-%s", expiryYear, expiryMonth, expiryDay)
-		log.Println("Found expiry date:", license.ExpiryDate)
-		
-		// Try to find issue date by looking for a pattern in the raw data
-		issueMatch := regexp.MustCompile(`(\d{4})-(\d{2})-(\d{2})`).FindStringSubmatch(raw)
-		if len(issueMatch) > 3 {
-			issueYear := issueMatch[1]
-			issueMonth := issueMatch[2]
-			issueDay := issueMatch[3]
-			license.IssueDate = fmt.Sprintf("%s-%s-%s", issueYear, issueMonth, issueDay)
-			log.Println("Found issue date from pattern:", license.IssueDate)
-		} else if license.ExpiryDate != "" {
-			// If we couldn't find an issue date pattern, calculate it from expiry date
-			// (typically 5 years earlier for standard licenses)
-			expiryParts := strings.Split(license.ExpiryDate, "-")
-			if len(expiryParts) == 3 {
-				expiryYearNum, _ := strconv.Atoi(expiryParts[0])
-				issueYear := expiryYearNum - 5
-				license.IssueDate = fmt.Sprintf("%d-%s-%s", issueYear, expiryParts[1], expiryParts[2])
-				log.Println("Calculated issue date:", license.IssueDate)
-			}
-		}
-	}
-	
-	// Extract physical details - look for pattern after the main data
-	// Pattern often includes height, weight, eye color
-	// Example: F168 57BLOBLU
-	physicalMatch := regexp.MustCompile(`([MF])(\d{3})\s+(\d{2})([A-Z]{3})([A-Z]{3})`).FindStringSubmatch(raw)
-	if len(physicalMatch) > 5 {
-		license.Sex = physicalMatch[1]    // M or F
-		license.Height = physicalMatch[2] // Height in cm
-		license.Weight = physicalMatch[3] // Weight in kg
-		license.HairColor = physicalMatch[4] // Hair color code
-		license.EyeColor = physicalMatch[5]  // Eye color code
-		
-		log.Printf("Found physical details - Sex: %s, Height: %s, Weight: %s, Hair: %s, Eyes: %s", 
-			license.Sex, license.Height, license.Weight, license.HairColor, license.EyeColor)
-	} else {
-		// Try alternative pattern for just sex and height
-		altPhysicalMatch := regexp.MustCompile(`([MF])(\d{3})`).FindStringSubmatch(raw)
-		if len(altPhysicalMatch) > 2 {
-			license.Sex = altPhysicalMatch[1]
-			license.Height = altPhysicalMatch[2]
-			log.Printf("Found alternative physical details - Sex: %s, Height: %s", license.Sex, license.Height)
-		}
-	}
-	
-	// Extract license class - common pattern is a digit or letter preceded by keyword
-	classMatch := regexp.MustCompile(`(?i)Class:\s*([A-Z0-9]+)`).FindStringSubmatch(raw)
-	if len(classMatch) > 1 {
-		license.LicenseClass = strings.TrimSpace(classMatch[1])
-		log.Println("Found license class:", license.LicenseClass)
-	} else {
-		// Try to find a standalone digit or letter that could be the class
-		// Common classes are 5, 7, G, M, etc.
-		simpleClassMatch := regexp.MustCompile(`\b([1-7ABCDEFGM])\b`).FindStringSubmatch(raw)
-		if len(simpleClassMatch) > 1 {
-			license.LicenseClass = simpleClassMatch[1]
-			log.Println("Found simple license class:", license.LicenseClass)
-		}
-	}
-	
-	return license
+func writeJSONError(w http.ResponseWriter, status int, err error) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "error",
+		"message": err.Error(),
+	})
 }
 
-// parseAAMVALicense parses AAMVA-standard driver's license data
-func parseAAMVALicense(raw string) *LicenseData {
-	log.Println("Parsing AAMVA license data")
-	
-	// Create a new license data struct
-	license := &LicenseData{
-		LicenseClass: "NA", // Default license class
-	}
-	
-	// Remove any NAK (0x15) character from the beginning
-	raw = strings.Replace(raw, "\x15", "", 1)
-	
-	// Split into lines
-	lines := strings.Split(raw, "\n")
-	
-	// Process each line based on AAMVA standard
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
 		}
-		
-		// Extract field based on prefix
-		if len(line) >= 3 {
-			prefix := line[0:3]
-			value := strings.TrimSpace(line[3:])
-			
-			switch prefix {
-			case "DCS":
-				license.LastName = value
-			case "DAC":
-				license.FirstName = value
-			case "DAD":
-				license.MiddleName = value
-			case "DBA":
-				if len(value) >= 8 {
-					year := value[0:4]
-					month := value[4:6]
-					day := value[6:8]
-					license.ExpiryDate = fmt.Sprintf("%s-%s-%s", year, month, day)
-				}
-			case "DBD":
-				if len(value) >= 8 {
-					year := value[0:4]
-					month := value[4:6]
-					day := value[6:8]
-					license.IssueDate = fmt.Sprintf("%s-%s-%s", year, month, day)
-				}
-			case "DBB":
-				if len(value) >= 8 {
-					year := value[0:4]
-					month := value[4:6]
-					day := value[6:8]
-					license.DOB = fmt.Sprintf("%s%s%s", year, month, day)
-				}
-			case "DBC":
-				if value == "1" {
-					license.Sex = "M"
-				} else if value == "2" {
-					license.Sex = "F"
-				} else {
-					license.Sex = value
-				}
-			case "DAU":
-				license.Height = strings.Replace(value, " ", "", -1)
-			case "DAG":
-				license.Address = value
-			case "DAI":
-				license.City = value
-			case "DAJ":
-				license.State = value
-			case "DAK":
-				license.Postal = value
-			case "DAQ":
-				if len(value) == 15 {
-					license.LicenseNumber = fmt.Sprintf("%s-%s-%s", 
-						value[0:5], value[5:10], value[10:15])
-				} else {
-					license.LicenseNumber = value
-				}
-			}
-		}
-		
-		// Check for license class
-		if strings.Contains(line, "DCAG") {
-			classMatch := regexp.MustCompile(`DCAG(\w+)`).FindStringSubmatch(line)
-			if len(classMatch) > 1 {
-				license.LicenseClass = classMatch[1]
-			}
-		}
-	}
-	
-	return license
-}
-
-// parseLicenseData parses the raw data into structured license data
-func parseLicenseData(raw string) *LicenseData {
-	// Remove any NAK (0x15) character from the beginning for format detection
-	cleanRaw := strings.Replace(raw, "\x15", "", 1)
-	
-	var license *LicenseData
-	
-	// Determine the format of the license data
-	if strings.Contains(cleanRaw, "%BC") || 
-	   strings.Contains(cleanRaw, "%AB") || 
-	   strings.Contains(cleanRaw, "%ON") || 
-	   strings.Contains(cleanRaw, "%QC") || 
-	   strings.Contains(cleanRaw, "%MB") || 
-	   strings.Contains(cleanRaw, "%SK") || 
-	   strings.Contains(cleanRaw, "%NS") || 
-	   strings.Contains(cleanRaw, "%NB") || 
-	   strings.Contains(cleanRaw, "%PE") || 
-	   strings.Contains(cleanRaw, "%NL") || 
-	   strings.Contains(cleanRaw, "%YT") || 
-	   strings.Contains(cleanRaw, "%NT") || 
-	   strings.Contains(cleanRaw, "%NU") {
-		// This is a Canadian driver's license
-		license = parseCanadianLicense(raw)
-	} else if strings.Contains(cleanRaw, "ANSI ") {
-		// This is an AAMVA format license
-		license = parseAAMVALicense(raw)
-	} else if strings.Contains(cleanRaw, "DCS") || strings.Contains(cleanRaw, "DAQ") {
-		// This is likely an AAMVA format license
-		license = parseAAMVALicense(raw)
-	} else {
-		// Try Canadian format first
-		license = parseCanadianLicense(raw)
-		
-		// If we couldn't extract basic info, try AAMVA as a fallback
-		if license.FirstName == "" && license.LastName == "" && license.LicenseNumber == "" {
-			license = parseAAMVALicense(raw)
-		}
-	}
-	
-	// Post-process data for consistency
-	if license.Height != "" && !strings.Contains(license.Height, "cm") {
-		license.Height = license.Height + "cm"
-	}
-	
-	return license
+		next.ServeHTTP(w, r)
+	})
 }
 
 func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string, scannerPort string, useSimpleCommand bool, useMacSettings bool, readTimeout time.Duration) {
@@ -672,30 +530,292 @@ func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string,
 		return
 	}
 
-	// Create the response object with raw data
-	response := SerialResponse{
-		Status:    "success",
-		RawData:   result,
-		RawHex:    hex.EncodeToString([]byte(result)),
-		Timestamp: time.Now().Format(time.RFC3339),
-	}
+	licenseData := parseLicenseData(result)
 	
-	// Try to parse the license data
-	parsedData := parseLicenseData(result)
-	if parsedData != nil {
-		// Only include parsed data if we successfully extracted some fields
-		if parsedData.FirstName != "" || parsedData.LastName != "" || 
-		   parsedData.Address != "" || parsedData.LicenseNumber != "" {
-			response.ParsedData = parsedData
-			fmt.Println("Successfully parsed license data")
-		} else {
-			fmt.Println("Failed to extract meaningful license data")
+	// Check if all fields are empty (except licenseClass which defaults to "NA")
+	allFieldsEmpty := licenseData.FirstName == "" && 
+		licenseData.LastName == "" && 
+		licenseData.Address == "" && 
+		licenseData.City == "" && 
+		licenseData.LicenseNumber == ""
+	
+	if allFieldsEmpty {
+		// Include the raw data for debugging
+		resp := map[string]interface{}{
+			"status":        "warning",
+			"message":       "Received data but no license fields were populated",
+			"licenseData":   licenseData,
+			"rawResponse":   result,
+			"rawResponseHex": hex.EncodeToString([]byte(result)),
 		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+		return
 	}
 
-	// Send the response as JSON
+	resp := map[string]interface{}{
+		"status":      "success",
+		"licenseData": licenseData,
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	json.NewEncoder(w).Encode(resp)
+}
+
+// generateESCPOSCommands creates raw ESC/POS commands for thermal printers
+func generateESCPOSCommands(receipt ReceiptData) ([]byte, error) {
+	var cmd bytes.Buffer
+	
+	// Initialize printer
+	cmd.Write([]byte{0x1B, 0x40}) // ESC @
+	
+	// Center align
+	cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1
+	
+	// Handle the special case for "No Sale" receipt
+	if receipt.Type == "noSale" {
+		// Set bold text
+		cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
+		cmd.WriteString("NO SALE\n\n")
+		cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
+		
+		// Add timestamp
+		if receipt.Timestamp != "" {
+			cmd.WriteString(receipt.Timestamp + "\n\n")
+		} else {
+			// Use current time if no timestamp provided
+			currentTime := time.Now().Format("2006-01-02 15:04:05")
+			cmd.WriteString(currentTime + "\n\n")
+		}
+		
+		// Add location if available
+		if receipt.Location != nil {
+			var locationName string
+			switch loc := receipt.Location.(type) {
+			case string:
+				locationName = loc
+			case map[string]interface{}:
+				if name, ok := loc["name"].(string); ok {
+					locationName = name
+				}
+			}
+			
+			if locationName != "" && locationName != "noSale" {
+				cmd.WriteString(locationName + "\n")
+			}
+		}
+		
+		// Extra space and cut paper
+		cmd.WriteString("\n\n\n")
+		cmd.Write([]byte{0x1D, 0x56, 0x41, 0x10}) // GS V A 16 (partial cut with feed)
+		
+		return cmd.Bytes(), nil
+	}
+	
+	// Get location name
+	var locationName string
+	switch loc := receipt.Location.(type) {
+	case string:
+		locationName = loc
+	case map[string]interface{}:
+		if name, ok := loc["name"].(string); ok {
+			locationName = name
+		}
+	}
+	
+	// Print header
+	cmd.WriteString(locationName + "\n")
+	cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
+	
+	if receipt.CustomerName != "" {
+		cmd.WriteString("Customer: " + receipt.CustomerName + "\n")
+	}
+	
+	cmd.WriteString(receipt.Date + "\n\n")
+	
+	// Left align
+	cmd.Write([]byte{0x1B, 0x61, 0x00}) // ESC a 0
+	
+	// Print transaction info
+	cmd.WriteString("Transaction ID: " + receipt.TransactionID + "\n")
+	cmd.WriteString("Payment: " + strings.Title(receipt.PaymentType) + "\n\n")
+	
+	// Print items
+	cmd.WriteString("ITEMS\n")
+	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
+	cmd.WriteString("                              \n") // Underline space
+	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
+	
+	for _, item := range receipt.Items {
+		cmd.WriteString(item.Name + "\n")
+		quantityPrice := fmt.Sprintf("%d x $%.2f", item.Quantity, item.Price)
+		// Fix: Convert int to float64 before multiplication
+		itemTotal := fmt.Sprintf("$%.2f", float64(item.Quantity)*item.Price)
+		cmd.WriteString(fmt.Sprintf("  %-20s %10s\n", quantityPrice, itemTotal))
+		
+		if item.SKU != "" {
+			cmd.WriteString("  SKU: " + item.SKU + "\n")
+		}
+		cmd.WriteString("\n")
+	}
+	
+	// Print divider
+	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
+	cmd.WriteString("                              \n") // Underline space
+	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
+	
+	// Print totals
+	cmd.WriteString(fmt.Sprintf("%-20s $%.2f\n", "Subtotal:", receipt.Subtotal))
+	
+	if receipt.DiscountPercentage > 0 && receipt.DiscountAmount > 0 {
+		cmd.WriteString(fmt.Sprintf("%-20s -$%.2f\n", fmt.Sprintf("Discount (%.0f%%):", receipt.DiscountPercentage), receipt.DiscountAmount))
+	}
+	
+	cmd.WriteString(fmt.Sprintf("%-20s $%.2f\n", "Tax:", receipt.Tax))
+	
+	// Calculate GST and PST
+	gst := receipt.Subtotal * 0.05
+	pst := receipt.Subtotal * 0.07
+	cmd.WriteString(fmt.Sprintf("  GST (5%%): $%.2f\n", gst))
+	cmd.WriteString(fmt.Sprintf("  PST (7%%): $%.2f\n", pst))
+	
+	if receipt.RefundAmount > 0 {
+		cmd.WriteString(fmt.Sprintf("%-20s -$%.2f\n", "Refund:", receipt.RefundAmount))
+	}
+	
+	if receipt.Tip > 0 {
+		cmd.WriteString(fmt.Sprintf("%-20s $%.2f\n", "Tip:", receipt.Tip))
+	}
+	
+	// Print total in bold
+	cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
+	cmd.WriteString(fmt.Sprintf("\n%-20s $%.2f\n", "TOTAL:", receipt.Total))
+	cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
+	
+	// Print cash details if applicable
+	if receipt.PaymentType == "cash" && receipt.CashGiven > 0 {
+		cmd.WriteString(fmt.Sprintf("%-20s $%.2f\n", "Cash:", receipt.CashGiven))
+		cmd.WriteString(fmt.Sprintf("%-20s $%.2f\n", "Change:", receipt.ChangeDue))
+	}
+	
+	// Print divider
+	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
+	cmd.WriteString("                              \n") // Underline space
+	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
+	
+	// Center align for footer
+	cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1
+	
+	// Print footer
+	cmd.WriteString("\nThank you for your purchase!\n")
+	cmd.WriteString("Visit us again at " + locationName + "\n\n\n")
+	
+	// Cut paper
+	cmd.Write([]byte{0x1D, 0x56, 0x41, 0x10}) // GS V A 16 (partial cut with feed)
+	
+	return cmd.Bytes(), nil
+}
+
+// printReceipt handles the receipt printing functionality
+func printReceiptHandler(w http.ResponseWriter, r *http.Request) {
+	// Only allow POST method
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, errors.New("only POST method is allowed"))
+		return
+	}
+	
+	// Read the request body
+	body, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, errors.New("error reading request body"))
+		return
+	}
+	defer r.Body.Close()
+	
+	// Parse the JSON data
+	var receipt ReceiptData
+	if err := json.Unmarshal(body, &receipt); err != nil {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("error parsing JSON data: %v", err))
+		return
+	}
+	
+	// Validate receipt - skip validation for 'noSale' type
+	if receipt.Type != "noSale" && receipt.TransactionID == "" {
+		writeJSONError(w, http.StatusBadRequest, errors.New("transaction ID is required"))
+		return
+	}
+	
+	// Set default copies if not specified
+	if receipt.Copies <= 0 {
+		receipt.Copies = 1
+	}
+	
+	// Generate ESC/POS commands
+	escposData, err := generateESCPOSCommands(receipt)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, errors.New("error generating ESC/POS commands"))
+		return
+	}
+	
+	// Create a temporary file for the ESC/POS data
+	tempFile, err := ioutil.TempFile("", "receipt-*.bin")
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, errors.New("error creating temporary file"))
+		return
+	}
+	defer os.Remove(tempFile.Name())
+	
+	// Write the ESC/POS data to the temporary file
+	if _, err := tempFile.Write(escposData); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, errors.New("error writing to temporary file"))
+		return
+	}
+	
+	// Close the temporary file
+	if err := tempFile.Close(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, errors.New("error closing temporary file"))
+		return
+	}
+	
+	// Define the printer command based on the OS
+	var cmd *exec.Cmd
+	
+	successCount := 0
+	for i := 0; i < receipt.Copies; i++ {
+		if runtime.GOOS == "windows" {
+			// Windows: use PowerShell to send to a specific printer (Receipt1)
+			cmd = exec.Command("powershell", "-Command", fmt.Sprintf("Get-Content -Path '%s' -Raw | Out-Printer -Name 'Receipt1'", tempFile.Name()))
+			fmt.Printf("Printing copy %d/%d using Receipt1 printer\n", i+1, receipt.Copies)
+		} else if runtime.GOOS == "darwin" {
+			// macOS: use lp command with specific printer
+			cmd = exec.Command("lp", "-d", "Receipt1", tempFile.Name())
+			fmt.Printf("Printing copy %d/%d using Receipt1 printer\n", i+1, receipt.Copies)
+		} else {
+			// Linux: use lp command with specific printer
+			cmd = exec.Command("lp", "-d", "Receipt1", tempFile.Name())
+			fmt.Printf("Printing copy %d/%d using Receipt1 printer\n", i+1, receipt.Copies)
+		}
+		
+		// Execute the command
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Printf("Print error (copy %d/%d): %v - %s", i+1, receipt.Copies, err, string(output))
+			continue
+		}
+		successCount++
+		fmt.Printf("Successfully printed copy %d/%d\n", i+1, receipt.Copies)
+	}
+	
+	// Return response
+	if successCount > 0 {
+		resp := map[string]interface{}{
+			"status":  "success",
+			"message": fmt.Sprintf("Printed %d/%d copies successfully", successCount, receipt.Copies),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	} else {
+		writeJSONError(w, http.StatusInternalServerError, errors.New("failed to print any copies"))
+	}
 }
 
 func main() {
@@ -705,6 +825,7 @@ func main() {
 	useSimpleCommandFlag := flag.Bool("simple-command", true, "Use simple command format without port parameter")
 	useMacSettingsFlag := flag.Bool("mac-settings", true, "Use Mac serial port settings (9600 baud, 8 data bits)")
 	readTimeoutFlag := flag.Int("timeout", 10, "Read timeout in seconds")
+	printerNameFlag := flag.String("printer", "Receipt1", "Printer name (default: Receipt1)")
 	flag.Parse()
 	
 	readTimeout := time.Duration(*readTimeoutFlag) * time.Second
@@ -712,16 +833,21 @@ func main() {
 	fmt.Printf("Starting with scanner port: %s, serial port: %s, HTTP port: %d, read timeout: %d seconds\n", 
 		*scannerPortFlag, *portFlag, *httpPortFlag, *readTimeoutFlag)
 	fmt.Printf("Simple command: %v, Mac settings: %v\n", *useSimpleCommandFlag, *useMacSettingsFlag)
+	fmt.Printf("Using printer: %s\n", *printerNameFlag)
 	
 	mux := http.NewServeMux()
 	
-	// Scanner endpoint - now just passes raw data
+	// Scanner endpoint
 	mux.HandleFunc("/scanner/scan", func(w http.ResponseWriter, r *http.Request) {
 		scannerHandler(w, r, *portFlag, *scannerPortFlag, *useSimpleCommandFlag, *useMacSettingsFlag, readTimeout)
 	})
 	
+	// Receipt printing endpoint
+	mux.HandleFunc("/print/receipt", printReceiptHandler)
+	
 	log.Printf("Starting server on http://localhost:%d", *httpPortFlag)
 	log.Printf("Scanner endpoint: http://localhost:%d/scanner/scan", *httpPortFlag)
+	log.Printf("Receipt printer endpoint: http://localhost:%d/print/receipt", *httpPortFlag)
 	
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", *httpPortFlag), corsMiddleware(mux)); err != nil {
 		log.Fatal(err)
