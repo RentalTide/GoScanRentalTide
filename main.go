@@ -788,7 +788,15 @@ func printReceipt(receipt ReceiptData, printerName string) error {
     pdfPath := strings.TrimSuffix(htmlPath, filepath.Ext(htmlPath)) + ".pdf"
     defer os.Remove(pdfPath)
 
-    // Convert HTML to PDF using Chrome headless
+    // Convert HTML to PDF using headless browser
+    fmt.Printf("Converting HTML to PDF using browser: %s\n", htmlPath)
+    
+    // Try different browsers in order of preference
+    var cmd *exec.Cmd
+    var output []byte
+    var browserErr error
+    
+    // Start with Chrome
     chromeArgs := []string{
         "--headless",
         "--disable-gpu",
@@ -796,24 +804,59 @@ func printReceipt(receipt ReceiptData, printerName string) error {
         "--print-to-pdf=" + pdfPath,
         htmlPath,
     }
-
-    fmt.Printf("Converting HTML to PDF using Chrome: %s\n", htmlPath)
-    cmd := exec.Command("chrome", chromeArgs...)
-    output, err := cmd.CombinedOutput()
-    if err != nil {
-        // Try alternative Chrome commands
-        cmd = exec.Command("google-chrome", chromeArgs...)
-        output, err = cmd.CombinedOutput()
-        if err != nil {
-            // Try one more alternative
-            cmd = exec.Command("chromium-browser", chromeArgs...)
-            output, err = cmd.CombinedOutput()
-            if err != nil {
-                return fmt.Errorf("error converting HTML to PDF: %v\nOutput: %s", err, string(output))
+    
+    // Try Microsoft Edge (Windows)
+    if runtime.GOOS == "windows" {
+        edgePath := "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+        if _, err := os.Stat(edgePath); os.IsNotExist(err) {
+            // Try the other common location
+            edgePath = "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"
+        }
+        
+        // Check if Edge exists
+        if _, err := os.Stat(edgePath); err == nil {
+            fmt.Println("Using Microsoft Edge for PDF conversion")
+            cmd = exec.Command(edgePath, "--headless", "--disable-gpu", "--no-margins", "--print-to-pdf="+pdfPath, htmlPath)
+            output, browserErr = cmd.CombinedOutput()
+            if browserErr == nil {
+                // Edge worked!
+                fmt.Printf("PDF successfully generated with Edge: %s\n", pdfPath)
+                goto PrintPDF
+            } else {
+                fmt.Printf("Edge failed: %v\n", browserErr)
             }
         }
     }
+    
+    // Try Chrome
+    cmd = exec.Command("chrome", chromeArgs...)
+    output, browserErr = cmd.CombinedOutput()
+    if browserErr == nil {
+        fmt.Printf("PDF successfully generated with Chrome: %s\n", pdfPath)
+        goto PrintPDF
+    }
+    
+    // Try Google Chrome
+    cmd = exec.Command("google-chrome", chromeArgs...)
+    output, browserErr = cmd.CombinedOutput()
+    if browserErr == nil {
+        fmt.Printf("PDF successfully generated with Google Chrome: %s\n", pdfPath)
+        goto PrintPDF
+    }
+    
+    // Try Chromium
+    cmd = exec.Command("chromium-browser", chromeArgs...)
+    output, browserErr = cmd.CombinedOutput()
+    if browserErr == nil {
+        fmt.Printf("PDF successfully generated with Chromium: %s\n", pdfPath)
+        goto PrintPDF
+    }
+    
+    // If we get here, all browsers failed
+    return fmt.Errorf("error converting HTML to PDF: no compatible browser found\nLast error: %v\nOutput: %s", 
+        browserErr, string(output))
 
+PrintPDF:
     fmt.Printf("PDF generated: %s\n", pdfPath)
 
     // Print the PDF silently based on OS
