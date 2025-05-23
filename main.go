@@ -6,16 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
 	"time"
 	"flag"
-	"io/ioutil"
 	"go.bug.st/serial"
 )
 
@@ -66,6 +68,182 @@ type ReceiptData struct {
 	Copies             int           `json:"copies"`
 	Type               string        `json:"type,omitempty"`      // Added for 'noSale' type
 	Timestamp          string        `json:"timestamp,omitempty"` // Added for timestamp
+}
+
+// HTML template for the receipt
+const receiptTemplate = `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Receipt</title>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            width: 80mm;
+            margin: 0;
+            padding: 10px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 10px;
+        }
+        .items {
+            width: 100%;
+        }
+        .item {
+            margin-bottom: 5px;
+        }
+        .divider {
+            border-top: 1px dashed #000;
+            margin: 10px 0;
+        }
+        .total {
+            font-weight: bold;
+            margin-top: 5px;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 20px;
+        }
+        .right-align {
+            text-align: right;
+        }
+        .bold {
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    {{if eq .Type "noSale"}}
+    <div class="header bold">
+        <div style="font-size: 16px;">NO SALE</div>
+        <div>{{if .Timestamp}}{{.Timestamp}}{{else}}{{now}}{{end}}</div>
+        {{if .Location}}
+        {{if isString .Location}}
+        <div>{{.Location}}</div>
+        {{else}}
+        <div>{{.Location.name}}</div>
+        {{end}}
+        {{end}}
+    </div>
+    {{else}}
+    <div class="header">
+        {{if isString .Location}}
+        <div class="bold">{{.Location}}</div>
+        {{else}}
+        <div class="bold">{{.Location.name}}</div>
+        {{end}}
+        {{if .CustomerName}}<div>Customer: {{.CustomerName}}</div>{{end}}
+        <div>{{.Date}}</div>
+    </div>
+    
+    <div>Transaction ID: {{.TransactionID}}</div>
+    <div>Payment: {{title .PaymentType}}</div>
+    
+    <div class="bold" style="margin-top: 10px;">ITEMS</div>
+    <div class="divider"></div>
+    
+    {{range .Items}}
+    <div class="item">
+        <div>{{.Name}}</div>
+        <div style="display: flex; justify-content: space-between;">
+            <span>{{.Quantity}} x ${{printf "%.2f" .Price}}</span>
+            <span>${{printf "%.2f" (multiply .Quantity .Price)}}</span>
+        </div>
+        {{if .SKU}}<div>SKU: {{.SKU}}</div>{{end}}
+    </div>
+    {{end}}
+    
+    <div class="divider"></div>
+    
+    <div style="display: flex; justify-content: space-between;">
+        <span>Subtotal:</span>
+        <span>${{printf "%.2f" .Subtotal}}</span>
+    </div>
+    
+    {{if and (gt .DiscountPercentage 0) (gt .DiscountAmount 0)}}
+    <div style="display: flex; justify-content: space-between;">
+        <span>Discount ({{printf "%.0f" .DiscountPercentage}}%):</span>
+        <span>-${{printf "%.2f" .DiscountAmount}}</span>
+    </div>
+    {{end}}
+    
+    <div style="display: flex; justify-content: space-between;">
+        <span>Tax:</span>
+        <span>${{printf "%.2f" .Tax}}</span>
+    </div>
+    
+    <div style="margin-left: 10px;">
+        <div style="display: flex; justify-content: space-between;">
+            <span>GST (5%):</span>
+            <span>${{printf "%.2f" (multiply .Subtotal 0.05)}}</span>
+        </div>
+        <div style="display: flex; justify-content: space-between;">
+            <span>PST (7%):</span>
+            <span>${{printf "%.2f" (multiply .Subtotal 0.07)}}</span>
+        </div>
+    </div>
+    
+    {{if gt .RefundAmount 0}}
+    <div style="display: flex; justify-content: space-between;">
+        <span>Refund:</span>
+        <span>-${{printf "%.2f" .RefundAmount}}</span>
+    </div>
+    {{end}}
+    
+    {{if gt .Tip 0}}
+    <div style="display: flex; justify-content: space-between;">
+        <span>Tip:</span>
+        <span>${{printf "%.2f" .Tip}}</span>
+    </div>
+    {{end}}
+    
+    <div class="total" style="display: flex; justify-content: space-between; margin-top: 10px;">
+        <span>TOTAL:</span>
+        <span>${{printf "%.2f" .Total}}</span>
+    </div>
+    
+    {{if and (eq .PaymentType "cash") (gt .CashGiven 0)}}
+    <div style="display: flex; justify-content: space-between;">
+        <span>Cash:</span>
+        <span>${{printf "%.2f" .CashGiven}}</span>
+    </div>
+    <div style="display: flex; justify-content: space-between;">
+        <span>Change:</span>
+        <span>${{printf "%.2f" .ChangeDue}}</span>
+    </div>
+    {{end}}
+    
+    <div class="divider"></div>
+    
+    <div class="footer">
+        <div>Thank you for your purchase!</div>
+        {{if isString .Location}}
+        <div>Visit us again at {{.Location}}</div>
+        {{else}}
+        <div>Visit us again at {{.Location.name}}</div>
+        {{end}}
+    </div>
+    {{end}}
+</body>
+</html>
+`
+
+// Template functions
+var templateFuncs = template.FuncMap{
+    "multiply": func(a, b float64) float64 {
+        return a * b
+    },
+    "title": strings.Title,
+    "now": func() string {
+        return time.Now().Format("2006-01-02 15:04:05")
+    },
+    "isString": func(v interface{}) bool {
+        _, ok := v.(string)
+        return ok
+    },
 }
 
 func parseBCLicenseData(raw string) LicenseData {
@@ -125,15 +303,14 @@ func parseBCLicenseData(raw string) LicenseData {
 		}
 	}
 
-	// License number
-// License number: extract last 7 digits after semicolon
-licenseNumMatch := regexp.MustCompile(`;(\d{13,16})=`).FindStringSubmatch(raw)
-if len(licenseNumMatch) > 1 {
-    full := licenseNumMatch[1]
-    if len(full) >= 7 {
-        license.LicenseNumber = full[len(full)-7:]
-    }
-}
+	// License number: extract last 7 digits after semicolon
+	licenseNumMatch := regexp.MustCompile(`;(\d{13,16})=`).FindStringSubmatch(raw)
+	if len(licenseNumMatch) > 1 {
+		full := licenseNumMatch[1]
+		if len(full) >= 7 {
+			license.LicenseNumber = full[len(full)-7:]
+		}
+	}
 
 
 	// Dates from =271220021204=
@@ -476,6 +653,107 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 	return result, nil
 }
 
+// generateHTMLReceipt creates an HTML receipt from ReceiptData
+func generateHTMLReceipt(receipt ReceiptData) (string, error) {
+    // Parse the template
+    tmpl, err := template.New("receipt").Funcs(templateFuncs).Parse(receiptTemplate)
+    if err != nil {
+        return "", fmt.Errorf("error parsing template: %v", err)
+    }
+
+    // Create a buffer to store the rendered HTML
+    var buf bytes.Buffer
+    if err := tmpl.Execute(&buf, receipt); err != nil {
+        return "", fmt.Errorf("error executing template: %v", err)
+    }
+
+    return buf.String(), nil
+}
+
+// printReceipt generates HTML, converts to PDF, and prints
+func printReceipt(receipt ReceiptData, printerName string) error {
+    // Generate HTML receipt
+    html, err := generateHTMLReceipt(receipt)
+    if err != nil {
+        return fmt.Errorf("error generating HTML receipt: %v", err)
+    }
+
+    // Create temporary HTML file
+    htmlFile, err := ioutil.TempFile("", "receipt-*.html")
+    if err != nil {
+        return fmt.Errorf("error creating temporary HTML file: %v", err)
+    }
+    htmlPath := htmlFile.Name()
+    defer os.Remove(htmlPath)
+
+    // Write HTML to file
+    if _, err := htmlFile.WriteString(html); err != nil {
+        htmlFile.Close()
+        return fmt.Errorf("error writing HTML to file: %v", err)
+    }
+    htmlFile.Close()
+
+    // Create temporary PDF file path
+    pdfPath := strings.TrimSuffix(htmlPath, filepath.Ext(htmlPath)) + ".pdf"
+    defer os.Remove(pdfPath)
+
+    // Convert HTML to PDF using Chrome headless
+    chromeArgs := []string{
+        "--headless",
+        "--disable-gpu",
+        "--no-margins",
+        "--print-to-pdf=" + pdfPath,
+        htmlPath,
+    }
+
+    fmt.Printf("Converting HTML to PDF using Chrome: %s\n", htmlPath)
+    cmd := exec.Command("chrome", chromeArgs...)
+    output, err := cmd.CombinedOutput()
+    if err != nil {
+        // Try alternative Chrome commands
+        cmd = exec.Command("google-chrome", chromeArgs...)
+        output, err = cmd.CombinedOutput()
+        if err != nil {
+            // Try one more alternative
+            cmd = exec.Command("chromium-browser", chromeArgs...)
+            output, err = cmd.CombinedOutput()
+            if err != nil {
+                return fmt.Errorf("error converting HTML to PDF: %v\nOutput: %s", err, string(output))
+            }
+        }
+    }
+
+    fmt.Printf("PDF generated: %s\n", pdfPath)
+
+    // Print the PDF silently based on OS
+    if runtime.GOOS == "windows" {
+        // Windows: use PowerShell to print silently
+        psCommand := fmt.Sprintf("Start-Process -FilePath \"%s\" -Verb Print -PassThru | %%{ sleep 2; $_.CloseMainWindow() }", pdfPath)
+        if printerName != "" {
+            // If printer name is specified, use it
+            psCommand = fmt.Sprintf("Start-Process -FilePath \"%s\" -Verb PrintTo -ArgumentList '\"%s\"' -PassThru | %%{ sleep 2; $_.CloseMainWindow() }", pdfPath, printerName)
+        }
+        cmd = exec.Command("powershell", "-Command", psCommand)
+        fmt.Printf("Printing PDF using PowerShell to printer: %s\n", printerName)
+    } else if runtime.GOOS == "darwin" {
+        // macOS: use lp command
+        cmd = exec.Command("lp", "-d", printerName, pdfPath)
+        fmt.Printf("Printing PDF using lp command on macOS to printer: %s\n", printerName)
+    } else {
+        // Linux: use lp command
+        cmd = exec.Command("lp", "-d", printerName, pdfPath)
+        fmt.Printf("Printing PDF using lp command on Linux to printer: %s\n", printerName)
+    }
+
+    output, err = cmd.CombinedOutput()
+    if err != nil {
+        return fmt.Errorf("error printing PDF: %v\nOutput: %s", err, string(output))
+    }
+
+    fmt.Printf("Successfully printed receipt\n")
+    return nil
+}
+
 func writeJSONError(w http.ResponseWriter, status int, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -561,261 +839,62 @@ func scannerHandler(w http.ResponseWriter, r *http.Request, portOverride string,
 	json.NewEncoder(w).Encode(resp)
 }
 
-// generateESCPOSCommands creates raw ESC/POS commands for thermal printers
-func generateESCPOSCommands(receipt ReceiptData) ([]byte, error) {
-	var cmd bytes.Buffer
-	
-	// Initialize printer
-	cmd.Write([]byte{0x1B, 0x40}) // ESC @
-	
-	// Center align
-	cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1
-	
-	// Handle the special case for "No Sale" receipt
-	if receipt.Type == "noSale" {
-		// Set bold text
-		cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
-		cmd.WriteString("NO SALE\n\n")
-		cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
-		
-		// Add timestamp
-		if receipt.Timestamp != "" {
-			cmd.WriteString(receipt.Timestamp + "\n\n")
-		} else {
-			// Use current time if no timestamp provided
-			currentTime := time.Now().Format("2006-01-02 15:04:05")
-			cmd.WriteString(currentTime + "\n\n")
-		}
-		
-		// Add location if available
-		if receipt.Location != nil {
-			var locationName string
-			switch loc := receipt.Location.(type) {
-			case string:
-				locationName = loc
-			case map[string]interface{}:
-				if name, ok := loc["name"].(string); ok {
-					locationName = name
-				}
-			}
-			
-			if locationName != "" && locationName != "noSale" {
-				cmd.WriteString(locationName + "\n")
-			}
-		}
-		
-		// Extra space and cut paper
-		cmd.WriteString("\n\n\n")
-		cmd.Write([]byte{0x1D, 0x56, 0x41, 0x10}) // GS V A 16 (partial cut with feed)
-		
-		return cmd.Bytes(), nil
-	}
-	
-	// Get location name
-	var locationName string
-	switch loc := receipt.Location.(type) {
-	case string:
-		locationName = loc
-	case map[string]interface{}:
-		if name, ok := loc["name"].(string); ok {
-			locationName = name
-		}
-	}
-	
-	// Print header
-	cmd.WriteString(locationName + "\n")
-	cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
-	
-	if receipt.CustomerName != "" {
-		cmd.WriteString("Customer: " + receipt.CustomerName + "\n")
-	}
-	
-	cmd.WriteString(receipt.Date + "\n\n")
-	
-	// Left align
-	cmd.Write([]byte{0x1B, 0x61, 0x00}) // ESC a 0
-	
-	// Print transaction info
-	cmd.WriteString("Transaction ID: " + receipt.TransactionID + "\n")
-	cmd.WriteString("Payment: " + strings.Title(receipt.PaymentType) + "\n\n")
-	
-	// Print items
-	cmd.WriteString("ITEMS\n")
-	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
-	cmd.WriteString("                              \n") // Underline space
-	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
-	
-	for _, item := range receipt.Items {
-		cmd.WriteString(item.Name + "\n")
-		quantityPrice := fmt.Sprintf("%d x $%.2f", item.Quantity, item.Price)
-		// Fix: Convert int to float64 before multiplication
-		itemTotal := fmt.Sprintf("$%.2f", float64(item.Quantity)*item.Price)
-		cmd.WriteString(fmt.Sprintf("  %-20s %10s\n", quantityPrice, itemTotal))
-		
-		if item.SKU != "" {
-			cmd.WriteString("  SKU: " + item.SKU + "\n")
-		}
-		cmd.WriteString("\n")
-	}
-	
-	// Print divider
-	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
-	cmd.WriteString("                              \n") // Underline space
-	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
-	
-	// Print totals
-	cmd.WriteString(fmt.Sprintf("%-20s $%.2f\n", "Subtotal:", receipt.Subtotal))
-	
-	if receipt.DiscountPercentage > 0 && receipt.DiscountAmount > 0 {
-		cmd.WriteString(fmt.Sprintf("%-20s -$%.2f\n", fmt.Sprintf("Discount (%.0f%%):", receipt.DiscountPercentage), receipt.DiscountAmount))
-	}
-	
-	cmd.WriteString(fmt.Sprintf("%-20s $%.2f\n", "Tax:", receipt.Tax))
-	
-	// Calculate GST and PST
-	gst := receipt.Subtotal * 0.05
-	pst := receipt.Subtotal * 0.07
-	cmd.WriteString(fmt.Sprintf("  GST (5%%): $%.2f\n", gst))
-	cmd.WriteString(fmt.Sprintf("  PST (7%%): $%.2f\n", pst))
-	
-	if receipt.RefundAmount > 0 {
-		cmd.WriteString(fmt.Sprintf("%-20s -$%.2f\n", "Refund:", receipt.RefundAmount))
-	}
-	
-	if receipt.Tip > 0 {
-		cmd.WriteString(fmt.Sprintf("%-20s $%.2f\n", "Tip:", receipt.Tip))
-	}
-	
-	// Print total in bold
-	cmd.Write([]byte{0x1B, 0x45, 0x01}) // ESC E 1 (bold)
-	cmd.WriteString(fmt.Sprintf("\n%-20s $%.2f\n", "TOTAL:", receipt.Total))
-	cmd.Write([]byte{0x1B, 0x45, 0x00}) // ESC E 0 (cancel bold)
-	
-	// Print cash details if applicable
-	if receipt.PaymentType == "cash" && receipt.CashGiven > 0 {
-		cmd.WriteString(fmt.Sprintf("%-20s $%.2f\n", "Cash:", receipt.CashGiven))
-		cmd.WriteString(fmt.Sprintf("%-20s $%.2f\n", "Change:", receipt.ChangeDue))
-	}
-	
-	// Print divider
-	cmd.Write([]byte{0x1B, 0x2D, 0x01}) // ESC - 1 (underline)
-	cmd.WriteString("                              \n") // Underline space
-	cmd.Write([]byte{0x1B, 0x2D, 0x00}) // ESC - 0 (cancel underline)
-	
-	// Center align for footer
-	cmd.Write([]byte{0x1B, 0x61, 0x01}) // ESC a 1
-	
-	// Print footer
-	cmd.WriteString("\nThank you for your purchase!\n")
-	cmd.WriteString("Visit us again at " + locationName + "\n\n\n")
-	
-	// Cut paper
-	cmd.Write([]byte{0x1D, 0x56, 0x41, 0x10}) // GS V A 16 (partial cut with feed)
-	
-	return cmd.Bytes(), nil
-}
-
-// printReceipt handles the receipt printing functionality
-func printReceiptHandler(w http.ResponseWriter, r *http.Request) {
-	// Only allow POST method
-	if r.Method != http.MethodPost {
-		writeJSONError(w, http.StatusMethodNotAllowed, errors.New("only POST method is allowed"))
-		return
-	}
-	
-	// Read the request body
-	body, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, errors.New("error reading request body"))
-		return
-	}
-	defer r.Body.Close()
-	
-	// Parse the JSON data
-	var receipt ReceiptData
-	if err := json.Unmarshal(body, &receipt); err != nil {
-		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("error parsing JSON data: %v", err))
-		return
-	}
-	
-	// Validate receipt - skip validation for 'noSale' type
-	if receipt.Type != "noSale" && receipt.TransactionID == "" {
-		writeJSONError(w, http.StatusBadRequest, errors.New("transaction ID is required"))
-		return
-	}
-	
-	// Set default copies if not specified
-	if receipt.Copies <= 0 {
-		receipt.Copies = 1
-	}
-	
-	// Generate ESC/POS commands
-	escposData, err := generateESCPOSCommands(receipt)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, errors.New("error generating ESC/POS commands"))
-		return
-	}
-	
-	// Create a temporary file for the ESC/POS data
-	tempFile, err := ioutil.TempFile("", "receipt-*.bin")
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, errors.New("error creating temporary file"))
-		return
-	}
-	defer os.Remove(tempFile.Name())
-	
-	// Write the ESC/POS data to the temporary file
-	if _, err := tempFile.Write(escposData); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, errors.New("error writing to temporary file"))
-		return
-	}
-	
-	// Close the temporary file
-	if err := tempFile.Close(); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, errors.New("error closing temporary file"))
-		return
-	}
-	
-	// Define the printer command based on the OS
-	var cmd *exec.Cmd
-	
-	successCount := 0
-	for i := 0; i < receipt.Copies; i++ {
-		if runtime.GOOS == "windows" {
-			// Windows: use PowerShell to send to a specific printer (Receipt1)
-			cmd = exec.Command("powershell", "-Command", fmt.Sprintf("Get-Content -Path '%s' -Raw | Out-Printer -Name 'Receipt1'", tempFile.Name()))
-			fmt.Printf("Printing copy %d/%d using Receipt1 printer\n", i+1, receipt.Copies)
-		} else if runtime.GOOS == "darwin" {
-			// macOS: use lp command with specific printer
-			cmd = exec.Command("lp", "-d", "Receipt1", tempFile.Name())
-			fmt.Printf("Printing copy %d/%d using Receipt1 printer\n", i+1, receipt.Copies)
-		} else {
-			// Linux: use lp command with specific printer
-			cmd = exec.Command("lp", "-d", "Receipt1", tempFile.Name())
-			fmt.Printf("Printing copy %d/%d using Receipt1 printer\n", i+1, receipt.Copies)
-		}
-		
-		// Execute the command
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			log.Printf("Print error (copy %d/%d): %v - %s", i+1, receipt.Copies, err, string(output))
-			continue
-		}
-		successCount++
-		fmt.Printf("Successfully printed copy %d/%d\n", i+1, receipt.Copies)
-	}
-	
-	// Return response
-	if successCount > 0 {
-		resp := map[string]interface{}{
-			"status":  "success",
-			"message": fmt.Sprintf("Printed %d/%d copies successfully", successCount, receipt.Copies),
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	} else {
-		writeJSONError(w, http.StatusInternalServerError, errors.New("failed to print any copies"))
-	}
+// printReceiptHandler handles the receipt printing functionality
+func printReceiptHandler(w http.ResponseWriter, r *http.Request, printerName string) {
+    // Only allow POST method
+    if r.Method != http.MethodPost {
+        writeJSONError(w, http.StatusMethodNotAllowed, errors.New("only POST method is allowed"))
+        return
+    }
+    
+    // Read the request body
+    body, err := ioutil.ReadAll(r.Body)
+    if err != nil {
+        writeJSONError(w, http.StatusBadRequest, errors.New("error reading request body"))
+        return
+    }
+    defer r.Body.Close()
+    
+    // Parse the JSON data
+    var receipt ReceiptData
+    if err := json.Unmarshal(body, &receipt); err != nil {
+        writeJSONError(w, http.StatusBadRequest, fmt.Errorf("error parsing JSON data: %v", err))
+        return
+    }
+    
+    // Validate receipt - skip validation for 'noSale' type
+    if receipt.Type != "noSale" && receipt.TransactionID == "" {
+        writeJSONError(w, http.StatusBadRequest, errors.New("transaction ID is required"))
+        return
+    }
+    
+    // Set default copies if not specified
+    if receipt.Copies <= 0 {
+        receipt.Copies = 1
+    }
+    
+    // Print the requested number of copies
+    successCount := 0
+    for i := 0; i < receipt.Copies; i++ {
+        fmt.Printf("Printing copy %d/%d\n", i+1, receipt.Copies)
+        if err := printReceipt(receipt, printerName); err != nil {
+            log.Printf("Print error (copy %d/%d): %v", i+1, receipt.Copies, err)
+            continue
+        }
+        successCount++
+    }
+    
+    // Return response
+    if successCount > 0 {
+        resp := map[string]interface{}{
+            "status":  "success",
+            "message": fmt.Sprintf("Printed %d/%d copies successfully", successCount, receipt.Copies),
+        }
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(resp)
+    } else {
+        writeJSONError(w, http.StatusInternalServerError, errors.New("failed to print any copies"))
+    }
 }
 
 func main() {
@@ -843,7 +922,9 @@ func main() {
 	})
 	
 	// Receipt printing endpoint
-	mux.HandleFunc("/print/receipt", printReceiptHandler)
+	mux.HandleFunc("/print/receipt", func(w http.ResponseWriter, r *http.Request) {
+		printReceiptHandler(w, r, *printerNameFlag)
+	})
 	
 	log.Printf("Starting server on http://localhost:%d", *httpPortFlag)
 	log.Printf("Scanner endpoint: http://localhost:%d/scanner/scan", *httpPortFlag)
