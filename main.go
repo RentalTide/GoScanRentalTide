@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 	"flag"
@@ -40,12 +41,12 @@ type LicenseData struct {
 	RawData       string `json:"rawData,omitempty"` // Added to show raw data for debugging
 }
 
-// Receipt Item represents an item on a receipt
+// ReceiptItem represents an item on a receipt
 type ReceiptItem struct {
-	Name     string  `json:"name"`
-	Quantity int     `json:"quantity"`
-	Price    float64 `json:"price"`
-	SKU      string  `json:"sku,omitempty"`
+	Name     string      `json:"name"`
+	Quantity interface{} `json:"quantity"` // Can be int or float64
+	Price    float64     `json:"price"`
+	SKU      string      `json:"sku,omitempty"`
 }
 
 // ReceiptData represents the data for a receipt
@@ -233,8 +234,29 @@ const receiptTemplate = `
 
 // Template functions
 var templateFuncs = template.FuncMap{
-    "multiply": func(a, b float64) float64 {
-        return a * b
+    "multiply": func(a interface{}, b interface{}) float64 {
+        // Convert operands to float64 regardless of their original type
+        var aFloat, bFloat float64
+        
+        switch v := a.(type) {
+        case int:
+            aFloat = float64(v)
+        case float64:
+            aFloat = v
+        default:
+            aFloat = 0
+        }
+        
+        switch v := b.(type) {
+        case int:
+            bFloat = float64(v)
+        case float64:
+            bFloat = v
+        default:
+            bFloat = 0
+        }
+        
+        return aFloat * bFloat
     },
     "title": strings.Title,
     "now": func() string {
@@ -653,6 +675,29 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 	return result, nil
 }
 
+// Convert interface to float64
+func toFloat64(v interface{}) float64 {
+    switch val := v.(type) {
+    case int:
+        return float64(val)
+    case float32:
+        return float64(val)
+    case float64:
+        return val
+    case string:
+        f, err := strconv.ParseFloat(val, 64)
+        if err == nil {
+            return f
+        }
+    case json.Number:
+        f, err := val.Float64()
+        if err == nil {
+            return f
+        }
+    }
+    return 0
+}
+
 // generateHTMLReceipt creates an HTML receipt from ReceiptData
 func generateHTMLReceipt(receipt ReceiptData) (string, error) {
     // Parse the template
@@ -855,9 +900,11 @@ func printReceiptHandler(w http.ResponseWriter, r *http.Request, printerName str
     }
     defer r.Body.Close()
     
-    // Parse the JSON data
+    // Parse the JSON data with more flexible number handling
     var receipt ReceiptData
-    if err := json.Unmarshal(body, &receipt); err != nil {
+    d := json.NewDecoder(strings.NewReader(string(body)))
+    d.UseNumber() // Use json.Number for numbers to avoid float64/int conversion issues
+    if err := d.Decode(&receipt); err != nil {
         writeJSONError(w, http.StatusBadRequest, fmt.Errorf("error parsing JSON data: %v", err))
         return
     }
