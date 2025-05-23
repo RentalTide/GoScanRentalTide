@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -192,11 +193,20 @@ const receiptTemplate = `
     </div>
     {{end}}
     
+    {{if gt .PromoAmount 0}}
+    <div style="display: flex; justify-content: space-between;">
+        <span>Promo Discount:</span>
+        <span>-${{printf "%.2f" .PromoAmount}}</span>
+    </div>
+    {{end}}
+
     <div style="display: flex; justify-content: space-between;">
         <span>Tax:</span>
         <span>${{printf "%.2f" .Tax}}</span>
     </div>
     
+    <!-- Tax Breakdown - Only show for non-settlement transactions -->
+    {{if .ShowTaxBreakdown}}
     <div style="margin-left: 10px;">
         <div style="display: flex; justify-content: space-between;">
             <span>GST (5%):</span>
@@ -207,18 +217,19 @@ const receiptTemplate = `
             <span>${{printf "%.2f" (multiply .Subtotal 0.07)}}</span>
         </div>
     </div>
-    
-    {{if gt .RefundAmount 0}}
-    <div style="display: flex; justify-content: space-between;">
-        <span>Refund:</span>
-        <span>-${{printf "%.2f" .RefundAmount}}</span>
-    </div>
     {{end}}
-    
+
     {{if gt .Tip 0}}
     <div style="display: flex; justify-content: space-between;">
         <span>Tip:</span>
         <span>${{printf "%.2f" .Tip}}</span>
+    </div>
+    {{end}}
+
+    {{if gt .SettlementAmount 0}}
+    <div style="display: flex; justify-content: space-between;">
+        <span>Account Settlement:</span>
+        <span>${{printf "%.2f" .SettlementAmount}}</span>
     </div>
     {{end}}
     
@@ -240,6 +251,84 @@ const receiptTemplate = `
     
     <div class="divider"></div>
     
+    <div style="margin-top: 10px;">
+        <div style="font-weight: bold;">Payment Details</div>
+        
+        <div style="display: flex; justify-content: space-between;">
+            <span>Payment Method:</span>
+            <span>{{title .PaymentType}}</span>
+        </div>
+        
+          {{if or (contains .PaymentType "credit") (contains .PaymentType "debit")}}
+
+            <div style="display: flex; justify-content: space-between;">
+              <span>Card:</span>
+              <span style="font-weight: medium;">
+                {{if index .CardDetails "cardBrand"}}
+                  {{with index .CardDetails "cardBrand"}}
+                    {{if isString .}}
+                      {{title .}}
+                    {{else}}
+                      Card
+                    {{end}}
+                  {{end}}
+                {{else}}
+                  Card
+                {{end}}
+                {{if index .CardDetails "cardLast4"}}
+                  {{with index .CardDetails "cardLast4"}}
+                    {{if isString .}}
+                      **** {{.}}
+                    {{end}}
+                  {{end}}
+                {{end}}
+              </span>
+            </div>
+
+            {{if index .CardDetails "authCode"}}
+            <div style="display: flex; justify-content: space-between;">
+              <span>Auth Code:</span>
+              <span>
+                {{index .CardDetails "authCode"}}
+              </span>
+            </div>
+            {{end}}
+
+            {{if .TerminalId}}
+            <div style="display: flex; justify-content: space-between;">
+              <span>Terminal ID:</span>
+              <span>
+                {{.TerminalId}}
+              </span>
+            </div>
+            {{end}}
+
+          {{end}}
+    </div>
+    
+    {{if .AccountId}}
+    <div style="margin-top: 10px;">
+        <div style="font-weight: bold;">Account Information</div>
+        
+        <div style="display: flex; justify-content: space-between;">
+            <span>Account ID:</span>
+            <span>{{.AccountId}}</span>
+        </div>
+        
+        {{if or .IsSettlement .HasCombinedTransaction}}
+        <div style="display: flex; justify-content: space-between;">
+            <span>Previous Balance:</span>
+            <span>${{printf "%.2f" .AccountBalanceBefore}}</span>
+        </div>
+        
+        <div style="display: flex; justify-content: space-between;">
+            <span>New Balance:</span>
+            <span>${{printf "%.2f" .AccountBalanceAfter}}</span>
+        </div>
+        {{end}}
+    </div>
+    {{end}}
+    
     <div class="footer">
         <div>Thank you for your purchase!</div>
         {{if isString .Location}}
@@ -252,6 +341,78 @@ const receiptTemplate = `
 </body>
 </html>
 `
+
+// ensureAppDirectory creates and returns the application's dedicated directory
+func ensureAppDirectory() (string, error) {
+    appDir := filepath.Join("C:", "GoScanRentalTide-main")
+    
+    // Create directories if they don't exist
+    if err := os.MkdirAll(appDir, 0755); err != nil {
+        return "", fmt.Errorf("failed to create application directory: %v", err)
+    }
+    
+    // Create temp subdirectory
+    tempDir := filepath.Join(appDir, "temp")
+    if err := os.MkdirAll(tempDir, 0755); err != nil {
+        return "", fmt.Errorf("failed to create temp directory: %v", err)
+    }
+    
+    // Create logs subdirectory
+    logsDir := filepath.Join(appDir, "logs")
+    if err := os.MkdirAll(logsDir, 0755); err != nil {
+        return "", fmt.Errorf("failed to create logs directory: %v", err)
+    }
+    
+    return appDir, nil
+}
+
+// setupLogging configures logging to write to a file in our app directory
+func setupLogging() (*os.File, error) {
+    appDir, err := ensureAppDirectory()
+    if err != nil {
+        return nil, err
+    }
+    
+    // Create log file with timestamp in name
+    timestamp := time.Now().Format("2006-01-02")
+    logPath := filepath.Join(appDir, "logs", fmt.Sprintf("goscantide-%s.log", timestamp))
+    
+    // Open log file for appending
+    logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+    if err != nil {
+        return nil, fmt.Errorf("failed to open log file: %v", err)
+    }
+    
+    // Configure logger to write to file and stdout
+    log.SetOutput(io.MultiWriter(logFile, os.Stdout))
+    log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+    
+    log.Printf("Logging initialized: %s", logPath)
+    return logFile, nil
+}
+
+// Convert interface to float64
+func toFloat64(v interface{}) float64 {
+    switch val := v.(type) {
+    case int:
+        return float64(val)
+    case float32:
+        return float64(val)
+    case float64:
+        return val
+    case string:
+        f, err := strconv.ParseFloat(val, 64)
+        if err == nil {
+            return f
+        }
+    case json.Number:
+        f, err := val.Float64()
+        if err == nil {
+            return f
+        }
+    }
+    return 0
+}
 
 // Template functions
 var templateFuncs = template.FuncMap{
@@ -718,29 +879,6 @@ func sendScannerCommand(commandStr string, portOverride string, useMacSettings b
 	return result, nil
 }
 
-// Convert interface to float64
-func toFloat64(v interface{}) float64 {
-    switch val := v.(type) {
-    case int:
-        return float64(val)
-    case float32:
-        return float64(val)
-    case float64:
-        return val
-    case string:
-        f, err := strconv.ParseFloat(val, 64)
-        if err == nil {
-            return f
-        }
-    case json.Number:
-        f, err := val.Float64()
-        if err == nil {
-            return f
-        }
-    }
-    return 0
-}
-
 // generateHTMLReceipt creates an HTML receipt from ReceiptData
 func generateHTMLReceipt(receipt ReceiptData) (string, error) {
     // Parse the template
@@ -769,27 +907,25 @@ func printReceipt(receipt ReceiptData, printerName string) error {
         return fmt.Errorf("error generating HTML receipt: %v", err)
     }
 
-    // Create temporary HTML file
-    htmlFile, err := ioutil.TempFile("", "receipt-*.html")
+    // Get app directory
+    appDir, err := ensureAppDirectory()
     if err != nil {
-        return fmt.Errorf("error creating temporary HTML file: %v", err)
+        return fmt.Errorf("error ensuring app directory: %v", err)
     }
-    htmlPath := htmlFile.Name()
-    defer os.Remove(htmlPath)
-
+    
+    // Create temporary file paths in our app directory
+    timestamp := time.Now().Format("20060102-150405")
+    htmlPath := filepath.Join(appDir, "temp", fmt.Sprintf("receipt-%s.html", timestamp))
+    pdfPath := filepath.Join(appDir, "temp", fmt.Sprintf("receipt-%s.pdf", timestamp))
+    
     // Write HTML to file
-    if _, err := htmlFile.WriteString(html); err != nil {
-        htmlFile.Close()
+    if err := ioutil.WriteFile(htmlPath, []byte(html), 0644); err != nil {
         return fmt.Errorf("error writing HTML to file: %v", err)
     }
-    htmlFile.Close()
-
-    // Create temporary PDF file path
-    pdfPath := strings.TrimSuffix(htmlPath, filepath.Ext(htmlPath)) + ".pdf"
-    defer os.Remove(pdfPath)
-
+    
     // Convert HTML to PDF using headless browser
     fmt.Printf("Converting HTML to PDF using browser: %s\n", htmlPath)
+    log.Printf("Converting HTML to PDF: %s -> %s\n", htmlPath, pdfPath)
     
     // Try different browsers in order of preference
     var cmd *exec.Cmd
@@ -816,14 +952,17 @@ func printReceipt(receipt ReceiptData, printerName string) error {
         // Check if Edge exists
         if _, err := os.Stat(edgePath); err == nil {
             fmt.Println("Using Microsoft Edge for PDF conversion")
+            log.Println("Using Microsoft Edge for PDF conversion")
             cmd = exec.Command(edgePath, "--headless", "--disable-gpu", "--no-margins", "--print-to-pdf="+pdfPath, htmlPath)
             output, browserErr = cmd.CombinedOutput()
             if browserErr == nil {
                 // Edge worked!
                 fmt.Printf("PDF successfully generated with Edge: %s\n", pdfPath)
+                log.Printf("PDF successfully generated with Edge: %s\n", pdfPath)
                 goto PrintPDF
             } else {
                 fmt.Printf("Edge failed: %v\n", browserErr)
+                log.Printf("Edge failed: %v\n%s", browserErr, string(output))
             }
         }
     }
@@ -833,7 +972,10 @@ func printReceipt(receipt ReceiptData, printerName string) error {
     output, browserErr = cmd.CombinedOutput()
     if browserErr == nil {
         fmt.Printf("PDF successfully generated with Chrome: %s\n", pdfPath)
+        log.Printf("PDF successfully generated with Chrome: %s\n", pdfPath)
         goto PrintPDF
+    } else {
+        log.Printf("Chrome failed: %v\n%s", browserErr, string(output))
     }
     
     // Try Google Chrome
@@ -841,7 +983,10 @@ func printReceipt(receipt ReceiptData, printerName string) error {
     output, browserErr = cmd.CombinedOutput()
     if browserErr == nil {
         fmt.Printf("PDF successfully generated with Google Chrome: %s\n", pdfPath)
+        log.Printf("PDF successfully generated with Google Chrome: %s\n", pdfPath)
         goto PrintPDF
+    } else {
+        log.Printf("Google Chrome failed: %v\n%s", browserErr, string(output))
     }
     
     // Try Chromium
@@ -849,7 +994,10 @@ func printReceipt(receipt ReceiptData, printerName string) error {
     output, browserErr = cmd.CombinedOutput()
     if browserErr == nil {
         fmt.Printf("PDF successfully generated with Chromium: %s\n", pdfPath)
+        log.Printf("PDF successfully generated with Chromium: %s\n", pdfPath)
         goto PrintPDF
+    } else {
+        log.Printf("Chromium failed: %v\n%s", browserErr, string(output))
     }
     
     // If we get here, all browsers failed
@@ -858,6 +1006,7 @@ func printReceipt(receipt ReceiptData, printerName string) error {
 
 PrintPDF:
     fmt.Printf("PDF generated: %s\n", pdfPath)
+    log.Printf("PDF generated: %s\n", pdfPath)
 
     // Print the PDF silently based on OS
     if runtime.GOOS == "windows" {
@@ -869,22 +1018,31 @@ PrintPDF:
         }
         cmd = exec.Command("powershell", "-Command", psCommand)
         fmt.Printf("Printing PDF using PowerShell to printer: %s\n", printerName)
+        log.Printf("Printing PDF using PowerShell to printer: %s\n", printerName)
     } else if runtime.GOOS == "darwin" {
         // macOS: use lp command
         cmd = exec.Command("lp", "-d", printerName, pdfPath)
         fmt.Printf("Printing PDF using lp command on macOS to printer: %s\n", printerName)
+        log.Printf("Printing PDF using lp command on macOS to printer: %s\n", printerName)
     } else {
         // Linux: use lp command
         cmd = exec.Command("lp", "-d", printerName, pdfPath)
         fmt.Printf("Printing PDF using lp command on Linux to printer: %s\n", printerName)
+        log.Printf("Printing PDF using lp command on Linux to printer: %s\n", printerName)
     }
 
     output, err = cmd.CombinedOutput()
     if err != nil {
+        log.Printf("Printing error: %v\n%s", err, string(output))
         return fmt.Errorf("error printing PDF: %v\nOutput: %s", err, string(output))
     }
 
     fmt.Printf("Successfully printed receipt\n")
+    log.Printf("Successfully printed receipt\n")
+    
+    // We'll keep the files for debugging purposes
+    // They're in our dedicated app directory, so they won't clutter the temp folder
+    
     return nil
 }
 
@@ -1043,12 +1201,27 @@ func main() {
 	printerNameFlag := flag.String("printer", "Receipt1", "Printer name (default: Receipt1)")
 	flag.Parse()
 	
+	// Set up our application directory and logging
+	logFile, err := setupLogging()
+	if err != nil {
+		fmt.Printf("Error setting up logging: %v\n", err)
+		os.Exit(1)
+	}
+	defer logFile.Close()
+	
+	// Create app directory if it doesn't exist
+	appDir, err := ensureAppDirectory()
+	if err != nil {
+		log.Fatalf("Error creating app directory: %v", err)
+	}
+	
 	readTimeout := time.Duration(*readTimeoutFlag) * time.Second
 	
-	fmt.Printf("Starting with scanner port: %s, serial port: %s, HTTP port: %d, read timeout: %d seconds\n", 
+	log.Printf("Application directory: %s", appDir)
+	log.Printf("Starting with scanner port: %s, serial port: %s, HTTP port: %d, read timeout: %d seconds", 
 		*scannerPortFlag, *portFlag, *httpPortFlag, *readTimeoutFlag)
-	fmt.Printf("Simple command: %v, Mac settings: %v\n", *useSimpleCommandFlag, *useMacSettingsFlag)
-	fmt.Printf("Using printer: %s\n", *printerNameFlag)
+	log.Printf("Simple command: %v, Mac settings: %v", *useSimpleCommandFlag, *useMacSettingsFlag)
+	log.Printf("Using printer: %s", *printerNameFlag)
 	
 	mux := http.NewServeMux()
 	
@@ -1062,9 +1235,21 @@ func main() {
 		printReceiptHandler(w, r, *printerNameFlag)
 	})
 	
+	// Add a status endpoint
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "ok",
+			"version": "1.0.0",
+			"appDir": appDir,
+			"time": time.Now().Format(time.RFC3339),
+		})
+	})
+	
 	log.Printf("Starting server on http://localhost:%d", *httpPortFlag)
 	log.Printf("Scanner endpoint: http://localhost:%d/scanner/scan", *httpPortFlag)
 	log.Printf("Receipt printer endpoint: http://localhost:%d/print/receipt", *httpPortFlag)
+	log.Printf("Status endpoint: http://localhost:%d/status", *httpPortFlag)
 	
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", *httpPortFlag), corsMiddleware(mux)); err != nil {
 		log.Fatal(err)
