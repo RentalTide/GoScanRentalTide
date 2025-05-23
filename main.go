@@ -72,24 +72,24 @@ type ReceiptData struct {
 	Timestamp          string        `json:"timestamp,omitempty"` // Added for timestamp
 	
 	// Enhanced fields
-	TerminalId           string              `json:"terminalId,omitempty"`
-	CardDetails          map[string]string   `json:"cardDetails,omitempty"`
-	AccountId            string              `json:"accountId,omitempty"`
-	AccountBalanceBefore float64             `json:"accountBalanceBefore,omitempty"`
-	AccountBalanceAfter  float64             `json:"accountBalanceAfter,omitempty"`
-	SettlementAmount     float64             `json:"settlementAmount,omitempty"`
-	TransactionFee       float64             `json:"transactionFee,omitempty"`
-	InterchangeFee       float64             `json:"interchangeFee,omitempty"`
+	TerminalId           string                 `json:"terminalId,omitempty"`
+	CardDetails          map[string]interface{} `json:"cardDetails,omitempty"`
+	AccountId            string                 `json:"accountId,omitempty"`
+	AccountBalanceBefore float64                `json:"accountBalanceBefore,omitempty"`
+	AccountBalanceAfter  float64                `json:"accountBalanceAfter,omitempty"`
+	SettlementAmount     float64                `json:"settlementAmount,omitempty"`
+	TransactionFee       float64                `json:"transactionFee,omitempty"`
+	InterchangeFee       float64                `json:"interchangeFee,omitempty"`
 	GLCodeSummary        []map[string]interface{} `json:"glCodeSummary,omitempty"`
-	IsSettlement         bool                `json:"isSettlement,omitempty"`
-	IsRetail             bool                `json:"isRetail,omitempty"`
-	HasCombinedTransaction bool              `json:"hasCombinedTransaction,omitempty"`
-	SkipTaxCalculation   bool                `json:"skipTaxCalculation,omitempty"`
-	HasNoTax             bool                `json:"hasNoTax,omitempty"`
-	LogoUrl              string              `json:"logoUrl,omitempty"`
+	IsSettlement         bool                   `json:"isSettlement,omitempty"`
+	IsRetail             bool                   `json:"isRetail,omitempty"`
+	HasCombinedTransaction bool                 `json:"hasCombinedTransaction,omitempty"`
+	SkipTaxCalculation   bool                   `json:"skipTaxCalculation,omitempty"`
+	HasNoTax             bool                   `json:"hasNoTax,omitempty"`
+	LogoUrl              string                 `json:"logoUrl,omitempty"`
 	
 	// Derived fields (calculated before template rendering)
-	ShowTaxBreakdown    bool                `json:"-"`
+	ShowTaxBreakdown    bool                   `json:"-"`
 }
 
 // HTML template for the receipt
@@ -287,6 +287,7 @@ var templateFuncs = template.FuncMap{
         _, ok := v.(string)
         return ok
     },
+    "contains": strings.Contains,
     "gt": func(a, b interface{}) bool {
         aFloat := toFloat64(a)
         bFloat := toFloat64(b)
@@ -304,6 +305,9 @@ var templateFuncs = template.FuncMap{
     },
     "and": func(a, b bool) bool {
         return a && b
+    },
+    "or": func(a, b bool) bool {
+        return a || b
     },
 }
 
