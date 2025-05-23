@@ -64,11 +64,32 @@ type ReceiptData struct {
 	RefundAmount       float64       `json:"refundAmount,omitempty"`
 	DiscountAmount     float64       `json:"discountAmount,omitempty"`
 	DiscountPercentage float64       `json:"discountPercentage,omitempty"`
+	PromoAmount        float64       `json:"promoAmount,omitempty"`
 	CashGiven          float64       `json:"cashGiven,omitempty"`
 	ChangeDue          float64       `json:"changeDue,omitempty"`
 	Copies             int           `json:"copies"`
 	Type               string        `json:"type,omitempty"`      // Added for 'noSale' type
 	Timestamp          string        `json:"timestamp,omitempty"` // Added for timestamp
+	
+	// Enhanced fields
+	TerminalId           string              `json:"terminalId,omitempty"`
+	CardDetails          map[string]string   `json:"cardDetails,omitempty"`
+	AccountId            string              `json:"accountId,omitempty"`
+	AccountBalanceBefore float64             `json:"accountBalanceBefore,omitempty"`
+	AccountBalanceAfter  float64             `json:"accountBalanceAfter,omitempty"`
+	SettlementAmount     float64             `json:"settlementAmount,omitempty"`
+	TransactionFee       float64             `json:"transactionFee,omitempty"`
+	InterchangeFee       float64             `json:"interchangeFee,omitempty"`
+	GLCodeSummary        []map[string]interface{} `json:"glCodeSummary,omitempty"`
+	IsSettlement         bool                `json:"isSettlement,omitempty"`
+	IsRetail             bool                `json:"isRetail,omitempty"`
+	HasCombinedTransaction bool              `json:"hasCombinedTransaction,omitempty"`
+	SkipTaxCalculation   bool                `json:"skipTaxCalculation,omitempty"`
+	HasNoTax             bool                `json:"hasNoTax,omitempty"`
+	LogoUrl              string              `json:"logoUrl,omitempty"`
+	
+	// Derived fields (calculated before template rendering)
+	ShowTaxBreakdown    bool                `json:"-"`
 }
 
 // HTML template for the receipt
@@ -265,6 +286,24 @@ var templateFuncs = template.FuncMap{
     "isString": func(v interface{}) bool {
         _, ok := v.(string)
         return ok
+    },
+    "gt": func(a, b interface{}) bool {
+        aFloat := toFloat64(a)
+        bFloat := toFloat64(b)
+        return aFloat > bFloat
+    },
+    "lt": func(a, b interface{}) bool {
+        aFloat := toFloat64(a)
+        bFloat := toFloat64(b)
+        return aFloat < bFloat
+    },
+    "eq": func(a, b interface{}) bool {
+        aFloat := toFloat64(a)
+        bFloat := toFloat64(b)
+        return aFloat == bFloat
+    },
+    "and": func(a, b bool) bool {
+        return a && b
     },
 }
 
@@ -717,6 +756,9 @@ func generateHTMLReceipt(receipt ReceiptData) (string, error) {
 
 // printReceipt generates HTML, converts to PDF, and prints
 func printReceipt(receipt ReceiptData, printerName string) error {
+    // Calculate derived fields
+    receipt.ShowTaxBreakdown = !receipt.IsSettlement && !receipt.SkipTaxCalculation && !receipt.HasNoTax
+    
     // Generate HTML receipt
     html, err := generateHTMLReceipt(receipt)
     if err != nil {
