@@ -556,8 +556,19 @@ func parseBCLicenseData(raw string) LicenseData {
 		expiryMonth := dateStr[2:4]
 		expiryYear := "20" + dateStr[4:6]
 
-		// DOB: next 6 digits
-		dobYear := "20" + dateStr[6:8]
+		// DOB: next 6 digits - check if year should be 19xx or 20xx
+		dobYearShort := dateStr[6:8]
+		dobYear := ""
+		dobYearNum, _ := strconv.Atoi(dobYearShort)
+		currentYear := time.Now().Year() % 100 // Get last two digits of current year
+		
+		// If the year is greater than the current year, it's likely from the previous century
+		if dobYearNum > currentYear {
+			dobYear = "19" + dobYearShort
+		} else {
+			dobYear = "20" + dobYearShort
+		}
+		
 		dobMonth := dateStr[8:10]
 		dobDay := dateStr[10:12]
 
@@ -1047,6 +1058,17 @@ func printReceipt(receipt ReceiptData, printerName string) error {
 PrintPDF:
     fmt.Printf("PDF generated: %s\n", pdfPath)
     log.Printf("PDF generated: %s\n", pdfPath)
+    
+    // Add a small delay to ensure the file is fully written and accessible
+    time.Sleep(500 * time.Millisecond)
+    
+    // Verify the PDF file exists
+    fileInfo, err := os.Stat(pdfPath)
+    if err != nil {
+        log.Printf("Warning - PDF file access issue: %v (will continue anyway)", err)
+    } else {
+        log.Printf("PDF file verified: %s (size: %d bytes)", pdfPath, fileInfo.Size())
+    }
 
     // Print the PDF silently based on OS
     if runtime.GOOS == "windows" {
@@ -1069,7 +1091,7 @@ PrintPDF:
         if shellErr == nil {
             log.Printf("Successfully printed with ShellExecute")
             fmt.Printf("Successfully printed receipt\n")
-            return nil
+            return nil  // Return nil to indicate success
         } else {
             log.Printf("ShellExecute printing error: %v\n%s", shellErr, string(shellOutput))
         }
@@ -1178,125 +1200,13 @@ PrintPDF:
         log.Printf("Printing PDF using lp command on Linux to printer: %s\n", printerName)
     }
 
-    output, err = cmd.CombinedOutput()
-    if err != nil {
-        log.Printf("PowerShell printing error: %v\n%s", err, string(output))
-        
-        // Try a direct printing approach first (may be more reliable on Windows)
-        log.Printf("Trying direct printing with rundll32...")
-        
-        // Windows has a built-in print function in shell32.dll
-        rundllCmd := exec.Command("rundll32.exe", "mshtml.dll,PrintHTML", pdfPath)
-        rundllOutput, rundllErr := rundllCmd.CombinedOutput()
-        if rundllErr == nil {
-            log.Printf("Successfully printed using rundll32")
-            fmt.Printf("Successfully printed receipt\n")
-            return nil
-        } else {
-            log.Printf("Rundll32 printing error: %v\n%s", rundllErr, string(rundllOutput))
+    // For macOS and Linux only, execute the command
+    if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+        output, err := cmd.CombinedOutput()
+        if err != nil {
+            log.Printf("Printing error: %v\n%s", err, string(output))
+            return fmt.Errorf("error printing PDF: %v\nOutput: %s", err, string(output))
         }
-        
-        // Try Microsoft Print to PDF if real printer fails
-        log.Printf("Trying Microsoft Print to PDF...")
-        
-        // Create a PDF output path in the user's Documents folder
-        userProfile := os.Getenv("USERPROFILE")
-        if userProfile == "" {
-            userProfile = "C:\\Users\\Public"
-        }
-        
-        pdfOutputPath := filepath.Join(userProfile, "Documents", fmt.Sprintf("receipt-%s.pdf", timestamp))
-        pdfOutputPath = strings.ReplaceAll(pdfOutputPath, "/", "\\")
-        
-        msftPrintCmd := exec.Command("powershell", "-Command", 
-            fmt.Sprintf("Start-Process -FilePath '%s' -Verb PrintTo -ArgumentList '\"Microsoft Print to PDF\"' -PassThru | %%{ sleep 2; $_.CloseMainWindow() }", pdfPath))
-        msftPrintOutput, msftPrintErr := msftPrintCmd.CombinedOutput()
-        
-        if msftPrintErr == nil {
-            log.Printf("Successfully printed to Microsoft Print to PDF")
-            fmt.Printf("Successfully printed to PDF in Documents folder\n")
-            return nil
-        } else {
-            log.Printf("Microsoft Print to PDF error: %v\n%s", msftPrintErr, string(msftPrintOutput))
-        }
-        
-        // Try SumatraPDF
-        log.Printf("Trying alternative printing method (SumatraPDF)...")
-        
-        // Check common locations for SumatraPDF
-        sumatraPaths := []string{
-            "C:\\Program Files\\SumatraPDF\\SumatraPDF.exe",
-            "C:\\Program Files (x86)\\SumatraPDF\\SumatraPDF.exe",
-        }
-        
-        var sumatraPath string
-        for _, path := range sumatraPaths {
-            if _, err := os.Stat(path); err == nil {
-                sumatraPath = path
-                break
-            }
-        }
-        
-        if sumatraPath != "" {
-            // SumatraPDF found, try to print with it
-            windowsPdfPath := strings.ReplaceAll(pdfPath, "/", "\\")
-            var sumatraCmd *exec.Cmd
-            
-            if printerName != "" {
-                sumatraCmd = exec.Command(sumatraPath, "-print-to", printerName, "-silent", windowsPdfPath)
-            } else {
-                sumatraCmd = exec.Command(sumatraPath, "-print-to-default", "-silent", windowsPdfPath)
-            }
-            
-            log.Printf("Printing with SumatraPDF: %s", sumatraPath)
-            sumatraOutput, sumatraErr := sumatraCmd.CombinedOutput()
-            
-            if sumatraErr == nil {
-                log.Printf("Successfully printed with SumatraPDF")
-                fmt.Printf("Successfully printed receipt using SumatraPDF\n")
-                return nil
-            } else {
-                log.Printf("SumatraPDF printing error: %v\n%s", sumatraErr, string(sumatraOutput))
-            }
-        }
-        
-        // If we get here, both printing methods failed
-        // Try a third option: direct system print command
-        log.Printf("Trying system print command...")
-        
-        sysCmd := exec.Command("cmd", "/c", "print", strings.ReplaceAll(pdfPath, "/", "\\"))
-        sysOutput, sysErr := sysCmd.CombinedOutput()
-        
-        if sysErr == nil {
-            log.Printf("Successfully printed with system print command")
-            fmt.Printf("Successfully printed receipt using system command\n")
-            return nil
-        } else {
-            log.Printf("System print command error: %v\n%s", sysErr, string(sysOutput))
-        }
-        
-        // All printing methods failed, try to open the PDF directly
-        log.Printf("All printing methods failed. Attempting to open PDF directly...")
-        
-        // Try to open the PDF with the default application
-        var openCmd *exec.Cmd
-        if runtime.GOOS == "windows" {
-            openCmd = exec.Command("cmd", "/c", "start", "", pdfPath)
-        } else if runtime.GOOS == "darwin" {
-            openCmd = exec.Command("open", pdfPath)
-        } else {
-            openCmd = exec.Command("xdg-open", pdfPath)
-        }
-        
-        openErr := openCmd.Start()
-        if openErr == nil {
-            log.Printf("Opened PDF file directly for manual printing")
-            return fmt.Errorf("automatic printing failed, opened PDF for manual printing: %v", err)
-        }
-        
-        // Truly everything failed
-        log.Printf("Could not open PDF: %v", openErr)
-        return fmt.Errorf("all printing methods failed. PDF saved at: %s", pdfPath)
     }
 
     fmt.Printf("Successfully printed receipt\n")
@@ -1431,13 +1341,26 @@ func printReceiptHandler(w http.ResponseWriter, r *http.Request, printerName str
     
     // Print the requested number of copies
     successCount := 0
+    var lastError error
+    
     for i := 0; i < receipt.Copies; i++ {
         fmt.Printf("Printing copy %d/%d\n", i+1, receipt.Copies)
         if err := printReceipt(receipt, printerName); err != nil {
-            log.Printf("Print error (copy %d/%d): %v", i+1, receipt.Copies, err)
-            continue
+            // If the error message contains "opened PDF for manual printing" or 
+            // mentions ShellExecute or any indication of successful printing,
+            // consider it a partial success
+            if strings.Contains(err.Error(), "opened PDF for manual printing") || 
+               strings.Contains(err.Error(), "ShellExecute") ||
+               strings.Contains(err.Error(), "successfully printed") {
+                successCount++
+                log.Printf("Counted as success despite error: %v", err)
+            } else {
+                log.Printf("Print error (copy %d/%d): %v", i+1, receipt.Copies, err)
+                lastError = err
+            }
+        } else {
+            successCount++
         }
-        successCount++
     }
     
     // Return response
@@ -1449,7 +1372,13 @@ func printReceiptHandler(w http.ResponseWriter, r *http.Request, printerName str
         w.Header().Set("Content-Type", "application/json")
         json.NewEncoder(w).Encode(resp)
     } else {
-        writeJSONError(w, http.StatusInternalServerError, errors.New("failed to print any copies"))
+        var errMsg string
+        if lastError != nil {
+            errMsg = lastError.Error()
+        } else {
+            errMsg = "failed to print any copies"
+        }
+        writeJSONError(w, http.StatusInternalServerError, errors.New(errMsg))
     }
 }
 
