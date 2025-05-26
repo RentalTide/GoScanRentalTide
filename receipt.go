@@ -29,21 +29,43 @@ type ReceiptItem struct {
 
 // Receipt data structure matching your React frontend
 type ReceiptData struct {
-	TransactionID    string        `json:"transactionId"`
-	Items           []ReceiptItem `json:"items"`
-	Subtotal        float64       `json:"subtotal"`
-	Tax             float64       `json:"tax"`
-	Total           float64       `json:"total"`
-	Tip             float64       `json:"tip"`
-	PaymentType     string        `json:"paymentType"`
-	CustomerName    string        `json:"customerName"`
-	Date            string        `json:"date"`
-	Location        string        `json:"location"`
-	Copies          int           `json:"copies"`
-	CashGiven       float64       `json:"cashGiven"`
-	ChangeDue       float64       `json:"changeDue"`
-	DiscountAmount  float64       `json:"discountAmount"`
-	RefundAmount    float64       `json:"refundAmount"`
+	TransactionID           string        `json:"transactionId"`
+	Items                  []ReceiptItem `json:"items"`
+	Subtotal               float64       `json:"subtotal"`
+	Tax                    float64       `json:"tax"`
+	Total                  float64       `json:"total"`
+	Tip                    float64       `json:"tip"`
+	PaymentType            string        `json:"paymentType"`
+	CustomerName           string        `json:"customerName"`
+	Date                   string        `json:"date"`
+	Location               string        `json:"location"`
+	Copies                 int           `json:"copies"`
+	CashGiven              float64       `json:"cashGiven"`
+	ChangeDue              float64       `json:"changeDue"`
+	DiscountAmount         float64       `json:"discountAmount"`
+	DiscountPercentage     float64       `json:"discountPercentage"`
+	PromoAmount            float64       `json:"promoAmount"`
+	RefundAmount           float64       `json:"refundAmount"`
+	TerminalId             string        `json:"terminalId"`
+	AccountId              string        `json:"accountId"`
+	AccountName            string        `json:"accountName"`
+	AccountBalanceBefore   float64       `json:"accountBalanceBefore"`
+	AccountBalanceAfter    float64       `json:"accountBalanceAfter"`
+	SettlementAmount       float64       `json:"settlementAmount"`
+	IsSettlement           bool          `json:"isSettlement"`
+	IsRetail               bool          `json:"isRetail"`
+	HasCombinedTransaction bool          `json:"hasCombinedTransaction"`
+	SkipTaxCalculation     bool          `json:"skipTaxCalculation"`
+	HasNoTax               bool          `json:"hasNoTax"`
+	LogoUrl                string        `json:"logoUrl"`
+	CardDetails            CardDetails   `json:"cardDetails"`
+}
+
+// Card details structure
+type CardDetails struct {
+	CardBrand string `json:"cardBrand"`
+	CardLast4 string `json:"cardLast4"`
+	AuthCode  string `json:"authCode"`
 }
 
 // Response structure
@@ -71,8 +93,22 @@ func logMessage(message string) {
 // Send data to printer via TCP
 func sendToPrinter(data string, copies int) error {
 	for i := 1; i <= copies; i++ {
+		// Try to resolve printer name to IP if it's not an IP address
+		printerAddress := config.PrinterIP
+		if !strings.Contains(printerAddress, ".") {
+			// Try to resolve hostname/printer name
+			ips, err := net.LookupIP(printerAddress)
+			if err != nil {
+				return fmt.Errorf("failed to resolve printer name '%s': %v", printerAddress, err)
+			}
+			if len(ips) > 0 {
+				printerAddress = ips[0].String()
+				logMessage(fmt.Sprintf("Resolved %s to %s", config.PrinterIP, printerAddress))
+			}
+		}
+		
 		// Connect to printer
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", config.PrinterIP, config.PrinterPort), 5*time.Second)
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", printerAddress, config.PrinterPort), 5*time.Second)
 		if err != nil {
 			return fmt.Errorf("failed to connect to printer: %v", err)
 		}
@@ -108,84 +144,191 @@ func formatReceipt(receipt ReceiptData) string {
 	// Reset printer
 	builder.WriteString(ESC + "@")
 
-	// Header - centered
+	// Header - centered and bold
 	builder.WriteString(ESC + "a" + string(rune(1))) // Center alignment
-	builder.WriteString("          RECEIPT          \n")
-	builder.WriteString(ESC + "a" + string(rune(0))) // Left alignment
-
-	builder.WriteString("================================\n")
-
-	// Store info
+	builder.WriteString(ESC + "E" + string(rune(1))) // Bold on
+	
 	location := receipt.Location
 	if location == "" {
 		location = "Store"
 	}
-	builder.WriteString(fmt.Sprintf("Location: %s\n", location))
+	builder.WriteString(fmt.Sprintf("%s\n", location))
+	builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
 
+	// Date - centered
 	date := receipt.Date
 	if date == "" {
 		date = time.Now().Format("2006-01-02 15:04:05")
 	}
-	builder.WriteString(fmt.Sprintf("Date: %s\n", date))
+	// Remove seconds from date for cleaner look
+	if len(date) > 16 {
+		date = date[:16]
+	}
+	builder.WriteString(fmt.Sprintf("%s\n", date))
 
-	builder.WriteString(fmt.Sprintf("Transaction: %s\n", receipt.TransactionID))
-
+	// Customer name if present
 	if receipt.CustomerName != "" {
 		builder.WriteString(fmt.Sprintf("Customer: %s\n", receipt.CustomerName))
 	}
 
-	builder.WriteString("================================\n\n")
+	builder.WriteString(ESC + "a" + string(rune(0))) // Left alignment
+	builder.WriteString("================================\n")
 
-	// Items
-	builder.WriteString("Items:\n")
+	// Transaction type indicators (matching React component)
+	if receipt.IsSettlement {
+		builder.WriteString("✓ Account Settlement Transaction\n")
+	} else if receipt.IsRetail {
+		builder.WriteString("✓ Retail Transaction\n")
+	} else if receipt.HasCombinedTransaction {
+		builder.WriteString("✓ Combined Retail & Settlement\n")
+	}
+
+	// Items section
+	builder.WriteString("\nITEMS\n")
 	for _, item := range receipt.Items {
 		itemTotal := float64(item.Quantity) * item.Price
+		
+		// Item name (bold)
+		builder.WriteString(ESC + "E" + string(rune(1)))
 		builder.WriteString(fmt.Sprintf("%s\n", item.Name))
-		builder.WriteString(fmt.Sprintf("  %d x $%.2f = $%.2f\n", item.Quantity, item.Price, itemTotal))
+		builder.WriteString(ESC + "E" + string(rune(0)))
+		
+		// Quantity and price details with right alignment
+		builder.WriteString(fmt.Sprintf("  %d x $%.2f", item.Quantity, item.Price))
+		
+		// Right-align the total
+		totalStr := fmt.Sprintf("$%.2f", itemTotal)
+		padding := 32 - len(fmt.Sprintf("  %d x $%.2f", item.Quantity, item.Price)) - len(totalStr)
+		if padding > 0 {
+			builder.WriteString(strings.Repeat(" ", padding))
+		}
+		builder.WriteString(totalStr + "\n")
+		
+		// SKU on separate line
 		if item.SKU != "" {
 			builder.WriteString(fmt.Sprintf("  SKU: %s\n", item.SKU))
 		}
+		builder.WriteString("\n")
 	}
 
-	builder.WriteString("\n================================\n")
+	builder.WriteString("================================\n")
 
-	// Totals
-	builder.WriteString(fmt.Sprintf("Subtotal: $%.2f\n", receipt.Subtotal))
+	// Totals section with right alignment
+	builder.WriteString(formatReceiptLine("Subtotal:", fmt.Sprintf("$%.2f", receipt.Subtotal)))
 
+	// Discounts
 	if receipt.DiscountAmount > 0 {
-		builder.WriteString(fmt.Sprintf("Discount: -$%.2f\n", receipt.DiscountAmount))
+		discountText := "Discount:"
+		if receipt.DiscountPercentage > 0 {
+			discountText = fmt.Sprintf("Discount (%.0f%%):", receipt.DiscountPercentage)
+		}
+		builder.WriteString(formatReceiptLine(discountText, fmt.Sprintf("-$%.2f", receipt.DiscountAmount)))
 	}
 
-	builder.WriteString(fmt.Sprintf("Tax: $%.2f\n", receipt.Tax))
+	if receipt.PromoAmount > 0 {
+		builder.WriteString(formatReceiptLine("Promo Discount:", fmt.Sprintf("-$%.2f", receipt.PromoAmount)))
+	}
+
+	builder.WriteString(formatReceiptLine("Tax:", fmt.Sprintf("$%.2f", receipt.Tax)))
+
+	// Tax breakdown (matching React component logic)
+	if !receipt.IsSettlement && !receipt.SkipTaxCalculation && !receipt.HasNoTax {
+		gst := receipt.Subtotal * 0.05
+		pst := receipt.Subtotal * 0.07
+		builder.WriteString(fmt.Sprintf("  GST (5%%): $%.2f\n", gst))
+		builder.WriteString(fmt.Sprintf("  PST (7%%): $%.2f\n", pst))
+	}
 
 	if receipt.Tip > 0 {
-		builder.WriteString(fmt.Sprintf("Tip: $%.2f\n", receipt.Tip))
+		builder.WriteString(formatReceiptLine("Tip:", fmt.Sprintf("$%.2f", receipt.Tip)))
 	}
 
-	// Bold total
-	builder.WriteString(ESC + "E" + string(rune(1))) // Bold on
-	builder.WriteString(fmt.Sprintf("Total: $%.2f", receipt.Total))
-	builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
+	if receipt.SettlementAmount > 0 {
+		builder.WriteString(formatReceiptLine("Account Settlement:", fmt.Sprintf("$%.2f", receipt.SettlementAmount)))
+	}
+
+	// Total (bold and highlighted)
 	builder.WriteString("\n")
+	builder.WriteString(ESC + "E" + string(rune(1))) // Bold on
+	builder.WriteString(formatReceiptLine("TOTAL:", fmt.Sprintf("$%.2f", receipt.Total)))
+	builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
 
-	builder.WriteString(fmt.Sprintf("Payment: %s\n", receipt.PaymentType))
+	builder.WriteString("================================\n")
 
-	// Cash details if applicable
+	// Payment Details section
+	builder.WriteString("\nPayment Details\n")
+	
+	// Payment method with emoji
+	paymentEmoji := getPaymentEmoji(receipt.PaymentType)
+	paymentDisplay := formatPaymentType(receipt.PaymentType, receipt.IsSettlement, receipt.HasCombinedTransaction)
+	builder.WriteString(formatReceiptLine("Payment Method:", fmt.Sprintf("%s %s", paymentEmoji, paymentDisplay)))
+
+	// Card details if applicable
+	if strings.Contains(receipt.PaymentType, "credit") || strings.Contains(receipt.PaymentType, "debit") {
+		if receipt.CardDetails.CardBrand != "" || receipt.CardDetails.CardLast4 != "" {
+			cardText := "Card"
+			if receipt.CardDetails.CardBrand != "" {
+				cardText = strings.Title(receipt.CardDetails.CardBrand)
+			}
+			if receipt.CardDetails.CardLast4 != "" {
+				cardText += fmt.Sprintf(" ****%s", receipt.CardDetails.CardLast4)
+			}
+			builder.WriteString(formatReceiptLine("Card:", cardText))
+		}
+
+		if receipt.CardDetails.AuthCode != "" {
+			builder.WriteString(formatReceiptLine("Auth Code:", receipt.CardDetails.AuthCode))
+		}
+
+		if receipt.TerminalId != "" {
+			builder.WriteString(formatReceiptLine("Terminal ID:", receipt.TerminalId))
+		}
+	}
+
+	// Cash details
 	if receipt.PaymentType == "cash" && receipt.CashGiven > 0 {
-		builder.WriteString(fmt.Sprintf("Cash: $%.2f\n", receipt.CashGiven))
-		builder.WriteString(fmt.Sprintf("Change: $%.2f\n", receipt.ChangeDue))
+		builder.WriteString("\n")
+		builder.WriteString(formatReceiptLine("Cash:", fmt.Sprintf("$%.2f", receipt.CashGiven)))
+		builder.WriteString(formatReceiptLine("Change:", fmt.Sprintf("$%.2f", receipt.ChangeDue)))
+	}
+
+	// Account information
+	if receipt.AccountId != "" {
+		builder.WriteString("\nAccount Information\n")
+		builder.WriteString(formatReceiptLine("Account ID:", receipt.AccountId))
+		if receipt.AccountName != "" {
+			builder.WriteString(formatReceiptLine("Account Name:", receipt.AccountName))
+		}
+
+		if receipt.IsSettlement || receipt.HasCombinedTransaction {
+			builder.WriteString(formatReceiptLine("Previous Balance:", fmt.Sprintf("$%.2f", receipt.AccountBalanceBefore)))
+			
+			balanceText := fmt.Sprintf("$%.2f", receipt.AccountBalanceAfter)
+			if receipt.AccountBalanceAfter == 0 {
+				balanceText += " (Fully Settled)"
+			}
+			builder.WriteString(formatReceiptLine("New Balance:", balanceText))
+		}
 	}
 
 	// Refund if applicable
 	if receipt.RefundAmount > 0 {
-		builder.WriteString(fmt.Sprintf("Refund: $%.2f\n", receipt.RefundAmount))
+		builder.WriteString("\n")
+		builder.WriteString(formatReceiptLine("Refund:", fmt.Sprintf("$%.2f", receipt.RefundAmount)))
 	}
 
-	builder.WriteString("================================\n\n")
+	builder.WriteString("================================\n")
 
 	// Footer - centered
 	builder.WriteString(ESC + "a" + string(rune(1))) // Center alignment
-	builder.WriteString("Thank you for your purchase!\n")
+	builder.WriteString("\nThank you for your purchase!\n")
+	builder.WriteString(fmt.Sprintf("Visit us again at %s\n", location))
+	builder.WriteString(ESC + "a" + string(rune(0))) // Left alignment
+
+	// Transaction ID as barcode simulation
+	builder.WriteString("\n")
+	builder.WriteString(ESC + "a" + string(rune(1))) // Center alignment
+	builder.WriteString(fmt.Sprintf("Transaction: %s\n", receipt.TransactionID))
 	builder.WriteString(ESC + "a" + string(rune(0))) // Left alignment
 
 	// Line feeds and cut
@@ -194,6 +337,47 @@ func formatReceipt(receipt ReceiptData) string {
 	builder.WriteString(GS + string(rune(86)) + string(rune(66)) + string(rune(0))) // Full cut
 
 	return builder.String()
+}
+
+// Helper function to format receipt lines with proper spacing
+func formatReceiptLine(label, value string) string {
+	totalWidth := 32 // Standard thermal printer width
+	padding := totalWidth - len(label) - len(value)
+	if padding < 1 {
+		padding = 1
+	}
+	return label + strings.Repeat(" ", padding) + value + "\n"
+}
+
+// Helper function to get payment emoji
+func getPaymentEmoji(paymentType string) string {
+	paymentEmojis := map[string]string{
+		"cash":    "💵",
+		"credit":  "💳",
+		"debit":   "💳",
+		"account": "📒",
+		"cheque":  "🧾",
+	}
+	
+	// Extract base payment type (remove -settlement suffix)
+	baseType := strings.Split(paymentType, "-")[0]
+	if emoji, exists := paymentEmojis[baseType]; exists {
+		return emoji
+	}
+	return "💰"
+}
+
+// Helper function to format payment type display
+func formatPaymentType(paymentType string, isSettlement, hasCombinedTransaction bool) string {
+	baseType := strings.Split(paymentType, "-")[0]
+	displayType := strings.Title(baseType)
+	
+	if hasCombinedTransaction {
+		return displayType + " (Combined Transaction)"
+	} else if isSettlement {
+		return displayType + " (Account Settlement)"
+	}
+	return displayType
 }
 
 // Test printer connection
@@ -325,7 +509,7 @@ func main() {
 	// Default configuration
 	config = Config{
 		Port:        3600,
-		PrinterIP:   "192.168.1.100",
+		PrinterIP:   "ESDPRT001",  // Can be IP address or printer name
 		PrinterPort: 9100,
 	}
 
