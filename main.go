@@ -1082,19 +1082,7 @@ PrintPDF:
 
         // For Windows, try several printing methods in order of reliability
         
-        // Method 1: Print using ShellExecute with verb "print"
-        log.Printf("Method 1: Using ShellExecute with 'print' verb...")
-        shellCmd := exec.Command("cmd", "/c", "start", "", "/wait", "/b", "powershell", "-Command", 
-            fmt.Sprintf("(New-Object -ComObject WScript.Shell).ShellExecute('%s', '', '', 'print', 1)", pdfPath))
-        shellOutput, shellErr := shellCmd.CombinedOutput()
-        
-        if shellErr == nil {
-            log.Printf("Successfully printed with ShellExecute")
-            fmt.Printf("Successfully printed receipt\n")
-            return nil  // Return nil to indicate success
-        } else {
-            log.Printf("ShellExecute printing error: %v\n%s", shellErr, string(shellOutput))
-        }
+
         
         // Method 2: Use direct system command line printer
         log.Printf("Method 2: Using direct system print command...")
