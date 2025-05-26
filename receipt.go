@@ -583,8 +583,64 @@ func formatPaymentType(paymentType string, isSettlement, hasCombinedTransaction 
 	return displayType
 }
 
-// Convert HTML content to formatted text for thermal printer
-func convertHTMLToText(receipt ReceiptData) string {
+// Helper function to format receipt lines with proper spacing
+func formatReceiptLine(label, value string) string {
+	totalWidth := 32 // Standard thermal printer width
+	padding := totalWidth - len(label) - len(value)
+	if padding < 1 {
+		padding = 1
+	}
+	return label + strings.Repeat(" ", padding) + value + "\n"
+}
+
+// Send properly formatted text to thermal printer (that actually looks good)
+func sendToThermalPrinter(receipt ReceiptData, copies int) error {
+	// Generate better formatted text that matches your React component
+	textContent := formatReceiptForThermalPrinter(receipt)
+	
+	for i := 1; i <= copies; i++ {
+		// Try to resolve printer name to IP if it's not an IP address
+		printerAddress := config.PrinterIP
+		if !strings.Contains(printerAddress, ".") {
+			// Try to resolve hostname/printer name
+			ips, err := net.LookupIP(printerAddress)
+			if err != nil {
+				return fmt.Errorf("failed to resolve printer name '%s': %v", printerAddress, err)
+			}
+			if len(ips) > 0 {
+				printerAddress = ips[0].String()
+				logMessage(fmt.Sprintf("Resolved %s to %s", config.PrinterIP, printerAddress))
+			}
+		}
+		
+		// Connect to printer
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", printerAddress, config.PrinterPort), 5*time.Second)
+		if err != nil {
+			return fmt.Errorf("failed to connect to printer: %v", err)
+		}
+		defer conn.Close()
+
+		// Set write timeout
+		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+
+		// Send properly formatted text
+		_, err = conn.Write([]byte(textContent))
+		if err != nil {
+			return fmt.Errorf("failed to send data to printer: %v", err)
+		}
+
+		logMessage(fmt.Sprintf("✓ Copy %d sent to printer successfully", i))
+
+		// Small delay between copies
+		if i < copies {
+			time.Sleep(1 * time.Second)
+		}
+	}
+	return nil
+}
+
+// Format receipt for thermal printer (much better version that matches your React component)
+func formatReceiptForThermalPrinter(receipt ReceiptData) string {
 	var builder strings.Builder
 	
 	// ESC/POS commands
@@ -594,11 +650,10 @@ func convertHTMLToText(receipt ReceiptData) string {
 	// Reset printer
 	builder.WriteString(ESC + "@")
 	
-	// Header - exactly like your React component
+	// Header - matching your React component exactly
 	builder.WriteString(ESC + "a" + string(rune(1))) // Center alignment
+	builder.WriteString(ESC + "E" + string(rune(1))) // Bold
 	
-	// Store name (bold and centered like your React h1)
-	builder.WriteString(ESC + "E" + string(rune(1))) // Bold on
 	location := receipt.Location
 	if location == "" {
 		location = "Store"
@@ -606,84 +661,75 @@ func convertHTMLToText(receipt ReceiptData) string {
 	builder.WriteString(fmt.Sprintf("%s\n", location))
 	builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
 	
-	// Date (centered, smaller text like your React component)
+	// Clean date (remove seconds like your React)
 	date := receipt.Date
 	if date == "" {
 		date = time.Now().Format("2006-01-02 15:04:05")
 	}
 	if len(date) > 16 {
-		date = date[:16] // Remove seconds like your React component
+		date = date[:16]
 	}
 	builder.WriteString(fmt.Sprintf("%s\n", date))
 	
-	// Customer name if present
 	if receipt.CustomerName != "" {
 		builder.WriteString(fmt.Sprintf("Customer: %s\n", receipt.CustomerName))
 	}
 	
 	builder.WriteString(ESC + "a" + string(rune(0))) // Left alignment
 	
-	// Dashed divider (exactly like your React component)
+	// Dashed divider (exactly like your React CSS)
 	builder.WriteString("================================\n")
 	
-	// Transaction type indicator (matching your React styling)
-	if receipt.IsSettlement {
+	// Transaction type (centered like your React component)
+	if receipt.IsSettlement || receipt.IsRetail || receipt.HasCombinedTransaction {
 		builder.WriteString(ESC + "a" + string(rune(1))) // Center
-		builder.WriteString("✓ Account Settlement Transaction\n")
-		builder.WriteString(ESC + "a" + string(rune(0))) // Left
-		builder.WriteString("\n")
-	} else if receipt.HasCombinedTransaction {
-		builder.WriteString(ESC + "a" + string(rune(1))) // Center
-		builder.WriteString("✓ Combined Retail & Settlement\n")
-		builder.WriteString(ESC + "a" + string(rune(0))) // Left
-		builder.WriteString("\n")
-	} else if receipt.IsRetail {
-		builder.WriteString(ESC + "a" + string(rune(1))) // Center
-		builder.WriteString("✓ Retail Transaction\n")
+		if receipt.IsSettlement {
+			builder.WriteString("✓ Account Settlement Transaction\n")
+		} else if receipt.HasCombinedTransaction {
+			builder.WriteString("✓ Combined Retail & Settlement\n")
+		} else {
+			builder.WriteString("✓ Retail Transaction\n")
+		}
 		builder.WriteString(ESC + "a" + string(rune(0))) // Left
 		builder.WriteString("\n")
 	}
 	
-	// Items section (exactly matching your React "ITEMS" header)
-	builder.WriteString(ESC + "E" + string(rune(1))) // Bold
+	// Items section (bold header like React)
+	builder.WriteString(ESC + "E" + string(rune(1)))
 	builder.WriteString("ITEMS\n")
-	builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
+	builder.WriteString(ESC + "E" + string(rune(0)))
 	
-	// Items (matching your React item layout)
 	for _, item := range receipt.Items {
 		itemTotal := float64(item.Quantity) * item.Price
 		
-		// Item name (bold like your React component)
+		// Item name (bold)
 		builder.WriteString(ESC + "E" + string(rune(1)))
 		builder.WriteString(fmt.Sprintf("%s\n", item.Name))
 		builder.WriteString(ESC + "E" + string(rune(0)))
 		
-		// Quantity and price with right-aligned total (like your React flexbox)
-		leftPart := fmt.Sprintf("  %d x $%.2f", item.Quantity, item.Price)
-		rightPart := fmt.Sprintf("$%.2f", itemTotal)
-		padding := 32 - len(leftPart) - len(rightPart)
-		if padding < 1 {
-			padding = 1
-		}
-		builder.WriteString(leftPart + strings.Repeat(" ", padding) + rightPart + "\n")
+		// Quantity and price with right-aligned total
+		builder.WriteString(formatReceiptLine(
+			fmt.Sprintf("  %d x $%.2f", item.Quantity, item.Price),
+			fmt.Sprintf("$%.2f", itemTotal),
+		))
 		
-		// SKU (matching your React caption styling)
 		if item.SKU != "" {
 			builder.WriteString(fmt.Sprintf("  SKU: %s\n", item.SKU))
 		}
-		builder.WriteString("\n") // Space between items like your React component
+		builder.WriteString("\n")
 	}
 	
 	// Dashed divider
 	builder.WriteString("================================\n")
 	
-	// Totals section (matching your React total-line flexbox layout)
+	// Totals (right-aligned like your React flexbox)
 	builder.WriteString(formatReceiptLine("Subtotal:", fmt.Sprintf("$%.2f", receipt.Subtotal)))
 	
-	// Discounts (with red styling indication)
 	if receipt.DiscountPercentage > 0 {
-		discountText := fmt.Sprintf("Discount (%.0f%%):", receipt.DiscountPercentage)
-		builder.WriteString(formatReceiptLine(discountText, fmt.Sprintf("-$%.2f", receipt.DiscountAmount)))
+		builder.WriteString(formatReceiptLine(
+			fmt.Sprintf("Discount (%.0f%%):", receipt.DiscountPercentage),
+			fmt.Sprintf("-$%.2f", receipt.DiscountAmount),
+		))
 	}
 	
 	if receipt.PromoAmount > 0 {
@@ -692,8 +738,9 @@ func convertHTMLToText(receipt ReceiptData) string {
 	
 	builder.WriteString(formatReceiptLine("Tax:", fmt.Sprintf("$%.2f", receipt.Tax)))
 	
-	// Tax breakdown (indented like your React component)
-	if !receipt.IsSettlement && !receipt.SkipTaxCalculation && !receipt.HasNoTax {
+	// Tax breakdown (indented like your React)
+	showTaxBreakdown := !receipt.IsSettlement && !receipt.SkipTaxCalculation && !receipt.HasNoTax
+	if showTaxBreakdown {
 		gst := receipt.Subtotal * 0.05
 		pst := receipt.Subtotal * 0.07
 		builder.WriteString(fmt.Sprintf("  GST (5%%): $%.2f\n", gst))
@@ -708,27 +755,27 @@ func convertHTMLToText(receipt ReceiptData) string {
 		builder.WriteString(formatReceiptLine("Account Settlement:", fmt.Sprintf("$%.2f", receipt.SettlementAmount)))
 	}
 	
-	// Final total (bold and highlighted like your React component)
+	// Bold total (like your React highlighted box)
 	builder.WriteString("\n")
-	builder.WriteString(ESC + "E" + string(rune(1))) // Bold
+	builder.WriteString(ESC + "E" + string(rune(1)))
 	builder.WriteString(formatReceiptLine("TOTAL:", fmt.Sprintf("$%.2f", receipt.Total)))
-	builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
+	builder.WriteString(ESC + "E" + string(rune(0)))
 	
 	// Dashed divider
 	builder.WriteString("================================\n")
 	
-	// Payment Details section (matching your React h3 styling)
+	// Payment Details (bold header like React)
 	builder.WriteString("\n")
-	builder.WriteString(ESC + "E" + string(rune(1))) // Bold
+	builder.WriteString(ESC + "E" + string(rune(1)))
 	builder.WriteString("Payment Details\n")
-	builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
+	builder.WriteString(ESC + "E" + string(rune(0)))
 	
-	// Payment method with emoji (exactly like your React component)
+	// Payment method with emoji
 	paymentEmoji := getPaymentEmoji(receipt.PaymentType)
 	paymentDisplay := formatPaymentType(receipt.PaymentType, receipt.IsSettlement, receipt.HasCombinedTransaction)
 	builder.WriteString(formatReceiptLine("Payment Method:", fmt.Sprintf("%s %s", paymentEmoji, paymentDisplay)))
 	
-	// Card details (matching your React conditional rendering)
+	// Card details
 	if strings.Contains(receipt.PaymentType, "credit") || strings.Contains(receipt.PaymentType, "debit") {
 		if receipt.CardDetails.CardBrand != "" || receipt.CardDetails.CardLast4 != "" {
 			cardText := "Card"
@@ -750,7 +797,7 @@ func convertHTMLToText(receipt ReceiptData) string {
 		}
 	}
 	
-	// Cash details (with background styling like your React component)
+	// Cash details (boxed like your React styling)
 	if receipt.PaymentType == "cash" && receipt.CashGiven > 0 {
 		builder.WriteString("\n--- Cash Details ---\n")
 		builder.WriteString(formatReceiptLine("Cash:", fmt.Sprintf("$%.2f", receipt.CashGiven)))
@@ -758,12 +805,12 @@ func convertHTMLToText(receipt ReceiptData) string {
 		builder.WriteString("----------------------\n")
 	}
 	
-	// Account Information (matching your React section)
+	// Account Information
 	if receipt.AccountId != "" {
 		builder.WriteString("\n")
-		builder.WriteString(ESC + "E" + string(rune(1))) // Bold
+		builder.WriteString(ESC + "E" + string(rune(1)))
 		builder.WriteString("Account Information\n")
-		builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
+		builder.WriteString(ESC + "E" + string(rune(0)))
 		
 		builder.WriteString(formatReceiptLine("Account ID:", receipt.AccountId))
 		if receipt.AccountName != "" {
@@ -775,7 +822,7 @@ func convertHTMLToText(receipt ReceiptData) string {
 			
 			balanceText := fmt.Sprintf("$%.2f", receipt.AccountBalanceAfter)
 			if receipt.AccountBalanceAfter == 0 {
-				balanceText += " (Fully Settled)" // Like your React success styling
+				balanceText += " (Fully Settled)"
 			}
 			builder.WriteString(formatReceiptLine("New Balance:", balanceText))
 		}
@@ -784,94 +831,24 @@ func convertHTMLToText(receipt ReceiptData) string {
 	// Dashed divider
 	builder.WriteString("================================\n")
 	
-	// Footer (centered like your React component)
-	builder.WriteString(ESC + "a" + string(rune(1))) // Center alignment
+	// Footer (centered like React)
+	builder.WriteString(ESC + "a" + string(rune(1))) // Center
 	builder.WriteString("\n")
-	builder.WriteString(ESC + "E" + string(rune(1))) // Bold
+	builder.WriteString(ESC + "E" + string(rune(1)))
 	builder.WriteString("Thank you for your purchase!\n")
-	builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
+	builder.WriteString(ESC + "E" + string(rune(0)))
 	builder.WriteString(fmt.Sprintf("Visit us again at %s\n", location))
 	
-	// Transaction ID (like your barcode section)
+	// Transaction ID
 	builder.WriteString("\n")
 	builder.WriteString(fmt.Sprintf("Transaction: %s\n", receipt.TransactionID))
-	builder.WriteString(ESC + "a" + string(rune(0))) // Left alignment
+	builder.WriteString(ESC + "a" + string(rune(0))) // Left
 	
-	// Line feeds and cut
+	// Cut paper
 	builder.WriteString("\n\n\n")
-	builder.WriteString(GS + string(rune(86)) + string(rune(66)) + string(rune(0))) // Full cut
+	builder.WriteString(GS + string(rune(86)) + string(rune(66)) + string(rune(0)))
 	
 	return builder.String()
-}
-
-// Helper function to format receipt lines with proper spacing
-func formatReceiptLine(label, value string) string {
-	totalWidth := 32 // Standard thermal printer width
-	padding := totalWidth - len(label) - len(value)
-	if padding < 1 {
-		padding = 1
-	}
-	return label + strings.Repeat(" ", padding) + value + "\n"
-}
-
-// Send beautiful HTML to printer (or save as file)
-func sendToThermalPrinter(receipt ReceiptData, copies int) error {
-	// Generate the beautiful HTML receipt (same as preview)
-	htmlContent, err := renderHTMLReceipt(receipt)
-	if err != nil {
-		return fmt.Errorf("failed to render HTML receipt: %v", err)
-	}
-	
-	for i := 1; i <= copies; i++ {
-		// Try to resolve printer name to IP if it's not an IP address
-		printerAddress := config.PrinterIP
-		if !strings.Contains(printerAddress, ".") {
-			// Try to resolve hostname/printer name
-			ips, err := net.LookupIP(printerAddress)
-			if err != nil {
-				return fmt.Errorf("failed to resolve printer name '%s': %v", printerAddress, err)
-			}
-			if len(ips) > 0 {
-				printerAddress = ips[0].String()
-				logMessage(fmt.Sprintf("Resolved %s to %s", config.PrinterIP, printerAddress))
-			}
-		}
-		
-		// Connect to printer
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", printerAddress, config.PrinterPort), 5*time.Second)
-		if err != nil {
-			// If printer connection fails, save HTML to file instead
-			filename := fmt.Sprintf("receipt_%s_copy_%d.html", receipt.TransactionID, i)
-			err = os.WriteFile(filename, []byte(htmlContent), 0644)
-			if err != nil {
-				return fmt.Errorf("failed to connect to printer and save file: %v", err)
-			}
-			logMessage(fmt.Sprintf("✓ Copy %d saved as %s (printer unavailable)", i, filename))
-			continue
-		}
-		defer conn.Close()
-
-		// Set write timeout
-		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-
-		// Send beautiful HTML to printer (for modern printers that support HTML)
-		_, err = conn.Write([]byte(htmlContent))
-		if err != nil {
-			// If sending HTML fails, save to file as backup
-			filename := fmt.Sprintf("receipt_%s_copy_%d.html", receipt.TransactionID, i)
-			os.WriteFile(filename, []byte(htmlContent), 0644)
-			logMessage(fmt.Sprintf("⚠️ Copy %d: printer failed, saved as %s", i, filename))
-			return fmt.Errorf("failed to send data to printer: %v", err)
-		}
-
-		logMessage(fmt.Sprintf("✓ Copy %d sent to printer successfully", i))
-
-		// Small delay between copies
-		if i < copies {
-			time.Sleep(1 * time.Second)
-		}
-	}
-	return nil
 }
 
 // Render HTML receipt
