@@ -150,9 +150,8 @@ func toFloat64(val interface{}) float64 {
 	}
 }
 
-// Modern HTML Receipt Template
-const receiptTemplate = `
-<!DOCTYPE html>
+// Modern HTML Receipt Template - Updated to use the new design
+const receiptTemplate = `<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
@@ -721,8 +720,7 @@ const receiptTemplate = `
         </div>
     </div>
 </body>
-</html>
-`
+</html>`
 
 // NewServer creates a new server instance
 func NewServer(cfg Config) *Server {
