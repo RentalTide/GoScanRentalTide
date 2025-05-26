@@ -594,126 +594,141 @@ func convertHTMLToText(receipt ReceiptData) string {
 	// Reset printer
 	builder.WriteString(ESC + "@")
 	
-	// Header - centered and bold
+	// Header - exactly like your React component
 	builder.WriteString(ESC + "a" + string(rune(1))) // Center alignment
-	builder.WriteString(ESC + "E" + string(rune(1))) // Bold on
 	
+	// Store name (bold and centered like your React h1)
+	builder.WriteString(ESC + "E" + string(rune(1))) // Bold on
 	location := receipt.Location
 	if location == "" {
 		location = "Store"
 	}
 	builder.WriteString(fmt.Sprintf("%s\n", location))
 	builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
-
-	// Date - centered
+	
+	// Date (centered, smaller text like your React component)
 	date := receipt.Date
 	if date == "" {
 		date = time.Now().Format("2006-01-02 15:04:05")
 	}
-	// Remove seconds from date for cleaner look
 	if len(date) > 16 {
-		date = date[:16]
+		date = date[:16] // Remove seconds like your React component
 	}
 	builder.WriteString(fmt.Sprintf("%s\n", date))
-
+	
 	// Customer name if present
 	if receipt.CustomerName != "" {
 		builder.WriteString(fmt.Sprintf("Customer: %s\n", receipt.CustomerName))
 	}
-
+	
 	builder.WriteString(ESC + "a" + string(rune(0))) // Left alignment
+	
+	// Dashed divider (exactly like your React component)
 	builder.WriteString("================================\n")
-
-	// Transaction type indicators
+	
+	// Transaction type indicator (matching your React styling)
 	if receipt.IsSettlement {
+		builder.WriteString(ESC + "a" + string(rune(1))) // Center
 		builder.WriteString("✓ Account Settlement Transaction\n")
-	} else if receipt.IsRetail {
-		builder.WriteString("✓ Retail Transaction\n")
+		builder.WriteString(ESC + "a" + string(rune(0))) // Left
+		builder.WriteString("\n")
 	} else if receipt.HasCombinedTransaction {
+		builder.WriteString(ESC + "a" + string(rune(1))) // Center
 		builder.WriteString("✓ Combined Retail & Settlement\n")
+		builder.WriteString(ESC + "a" + string(rune(0))) // Left
+		builder.WriteString("\n")
+	} else if receipt.IsRetail {
+		builder.WriteString(ESC + "a" + string(rune(1))) // Center
+		builder.WriteString("✓ Retail Transaction\n")
+		builder.WriteString(ESC + "a" + string(rune(0))) // Left
+		builder.WriteString("\n")
 	}
-
-	// Items section
-	builder.WriteString("\nITEMS\n")
+	
+	// Items section (exactly matching your React "ITEMS" header)
+	builder.WriteString(ESC + "E" + string(rune(1))) // Bold
+	builder.WriteString("ITEMS\n")
+	builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
+	
+	// Items (matching your React item layout)
 	for _, item := range receipt.Items {
 		itemTotal := float64(item.Quantity) * item.Price
 		
-		// Item name (bold)
+		// Item name (bold like your React component)
 		builder.WriteString(ESC + "E" + string(rune(1)))
 		builder.WriteString(fmt.Sprintf("%s\n", item.Name))
 		builder.WriteString(ESC + "E" + string(rune(0)))
 		
-		// Quantity and price details with right alignment
-		builder.WriteString(fmt.Sprintf("  %d x $%.2f", item.Quantity, item.Price))
-		
-		// Right-align the total
-		totalStr := fmt.Sprintf("$%.2f", itemTotal)
-		padding := 32 - len(fmt.Sprintf("  %d x $%.2f", item.Quantity, item.Price)) - len(totalStr)
-		if padding > 0 {
-			builder.WriteString(strings.Repeat(" ", padding))
+		// Quantity and price with right-aligned total (like your React flexbox)
+		leftPart := fmt.Sprintf("  %d x $%.2f", item.Quantity, item.Price)
+		rightPart := fmt.Sprintf("$%.2f", itemTotal)
+		padding := 32 - len(leftPart) - len(rightPart)
+		if padding < 1 {
+			padding = 1
 		}
-		builder.WriteString(totalStr + "\n")
+		builder.WriteString(leftPart + strings.Repeat(" ", padding) + rightPart + "\n")
 		
-		// SKU on separate line
+		// SKU (matching your React caption styling)
 		if item.SKU != "" {
 			builder.WriteString(fmt.Sprintf("  SKU: %s\n", item.SKU))
 		}
-		builder.WriteString("\n")
+		builder.WriteString("\n") // Space between items like your React component
 	}
-
+	
+	// Dashed divider
 	builder.WriteString("================================\n")
-
-	// Totals section with right alignment
+	
+	// Totals section (matching your React total-line flexbox layout)
 	builder.WriteString(formatReceiptLine("Subtotal:", fmt.Sprintf("$%.2f", receipt.Subtotal)))
-
-	// Discounts
-	if receipt.DiscountAmount > 0 {
-		discountText := "Discount:"
-		if receipt.DiscountPercentage > 0 {
-			discountText = fmt.Sprintf("Discount (%.0f%%):", receipt.DiscountPercentage)
-		}
+	
+	// Discounts (with red styling indication)
+	if receipt.DiscountPercentage > 0 {
+		discountText := fmt.Sprintf("Discount (%.0f%%):", receipt.DiscountPercentage)
 		builder.WriteString(formatReceiptLine(discountText, fmt.Sprintf("-$%.2f", receipt.DiscountAmount)))
 	}
-
+	
 	if receipt.PromoAmount > 0 {
 		builder.WriteString(formatReceiptLine("Promo Discount:", fmt.Sprintf("-$%.2f", receipt.PromoAmount)))
 	}
-
+	
 	builder.WriteString(formatReceiptLine("Tax:", fmt.Sprintf("$%.2f", receipt.Tax)))
-
-	// Tax breakdown
+	
+	// Tax breakdown (indented like your React component)
 	if !receipt.IsSettlement && !receipt.SkipTaxCalculation && !receipt.HasNoTax {
 		gst := receipt.Subtotal * 0.05
 		pst := receipt.Subtotal * 0.07
 		builder.WriteString(fmt.Sprintf("  GST (5%%): $%.2f\n", gst))
 		builder.WriteString(fmt.Sprintf("  PST (7%%): $%.2f\n", pst))
 	}
-
+	
 	if receipt.Tip > 0 {
 		builder.WriteString(formatReceiptLine("Tip:", fmt.Sprintf("$%.2f", receipt.Tip)))
 	}
-
+	
 	if receipt.SettlementAmount > 0 {
 		builder.WriteString(formatReceiptLine("Account Settlement:", fmt.Sprintf("$%.2f", receipt.SettlementAmount)))
 	}
-
-	// Total (bold and highlighted)
+	
+	// Final total (bold and highlighted like your React component)
 	builder.WriteString("\n")
-	builder.WriteString(ESC + "E" + string(rune(1))) // Bold on
+	builder.WriteString(ESC + "E" + string(rune(1))) // Bold
 	builder.WriteString(formatReceiptLine("TOTAL:", fmt.Sprintf("$%.2f", receipt.Total)))
 	builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
-
-	builder.WriteString("================================\n")
-
-	// Payment Details section
-	builder.WriteString("\nPayment Details\n")
 	
-	// Payment method with emoji
+	// Dashed divider
+	builder.WriteString("================================\n")
+	
+	// Payment Details section (matching your React h3 styling)
+	builder.WriteString("\n")
+	builder.WriteString(ESC + "E" + string(rune(1))) // Bold
+	builder.WriteString("Payment Details\n")
+	builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
+	
+	// Payment method with emoji (exactly like your React component)
 	paymentEmoji := getPaymentEmoji(receipt.PaymentType)
 	paymentDisplay := formatPaymentType(receipt.PaymentType, receipt.IsSettlement, receipt.HasCombinedTransaction)
 	builder.WriteString(formatReceiptLine("Payment Method:", fmt.Sprintf("%s %s", paymentEmoji, paymentDisplay)))
-
-	// Card details if applicable
+	
+	// Card details (matching your React conditional rendering)
 	if strings.Contains(receipt.PaymentType, "credit") || strings.Contains(receipt.PaymentType, "debit") {
 		if receipt.CardDetails.CardBrand != "" || receipt.CardDetails.CardLast4 != "" {
 			cardText := "Card"
@@ -725,67 +740,67 @@ func convertHTMLToText(receipt ReceiptData) string {
 			}
 			builder.WriteString(formatReceiptLine("Card:", cardText))
 		}
-
+		
 		if receipt.CardDetails.AuthCode != "" {
 			builder.WriteString(formatReceiptLine("Auth Code:", receipt.CardDetails.AuthCode))
 		}
-
+		
 		if receipt.TerminalId != "" {
 			builder.WriteString(formatReceiptLine("Terminal ID:", receipt.TerminalId))
 		}
 	}
-
-	// Cash details
+	
+	// Cash details (with background styling like your React component)
 	if receipt.PaymentType == "cash" && receipt.CashGiven > 0 {
-		builder.WriteString("\n")
+		builder.WriteString("\n--- Cash Details ---\n")
 		builder.WriteString(formatReceiptLine("Cash:", fmt.Sprintf("$%.2f", receipt.CashGiven)))
 		builder.WriteString(formatReceiptLine("Change:", fmt.Sprintf("$%.2f", receipt.ChangeDue)))
+		builder.WriteString("----------------------\n")
 	}
-
-	// Account information
+	
+	// Account Information (matching your React section)
 	if receipt.AccountId != "" {
-		builder.WriteString("\nAccount Information\n")
+		builder.WriteString("\n")
+		builder.WriteString(ESC + "E" + string(rune(1))) // Bold
+		builder.WriteString("Account Information\n")
+		builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
+		
 		builder.WriteString(formatReceiptLine("Account ID:", receipt.AccountId))
 		if receipt.AccountName != "" {
 			builder.WriteString(formatReceiptLine("Account Name:", receipt.AccountName))
 		}
-
+		
 		if receipt.IsSettlement || receipt.HasCombinedTransaction {
 			builder.WriteString(formatReceiptLine("Previous Balance:", fmt.Sprintf("$%.2f", receipt.AccountBalanceBefore)))
 			
 			balanceText := fmt.Sprintf("$%.2f", receipt.AccountBalanceAfter)
 			if receipt.AccountBalanceAfter == 0 {
-				balanceText += " (Fully Settled)"
+				balanceText += " (Fully Settled)" // Like your React success styling
 			}
 			builder.WriteString(formatReceiptLine("New Balance:", balanceText))
 		}
 	}
-
-	// Refund if applicable
-	if receipt.RefundAmount > 0 {
-		builder.WriteString("\n")
-		builder.WriteString(formatReceiptLine("Refund:", fmt.Sprintf("$%.2f", receipt.RefundAmount)))
-	}
-
+	
+	// Dashed divider
 	builder.WriteString("================================\n")
-
-	// Footer - centered
+	
+	// Footer (centered like your React component)
 	builder.WriteString(ESC + "a" + string(rune(1))) // Center alignment
-	builder.WriteString("\nThank you for your purchase!\n")
-	builder.WriteString(fmt.Sprintf("Visit us again at %s\n", location))
-	builder.WriteString(ESC + "a" + string(rune(0))) // Left alignment
-
-	// Transaction ID
 	builder.WriteString("\n")
-	builder.WriteString(ESC + "a" + string(rune(1))) // Center alignment
+	builder.WriteString(ESC + "E" + string(rune(1))) // Bold
+	builder.WriteString("Thank you for your purchase!\n")
+	builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
+	builder.WriteString(fmt.Sprintf("Visit us again at %s\n", location))
+	
+	// Transaction ID (like your barcode section)
+	builder.WriteString("\n")
 	builder.WriteString(fmt.Sprintf("Transaction: %s\n", receipt.TransactionID))
 	builder.WriteString(ESC + "a" + string(rune(0))) // Left alignment
-
+	
 	// Line feeds and cut
-	builder.WriteString(ESC + string(rune(100)) + string(rune(3))) // Feed 3 lines
 	builder.WriteString("\n\n\n")
 	builder.WriteString(GS + string(rune(86)) + string(rune(66)) + string(rune(0))) // Full cut
-
+	
 	return builder.String()
 }
 
