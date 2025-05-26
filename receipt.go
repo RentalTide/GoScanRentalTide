@@ -584,10 +584,7 @@ func formatPaymentType(paymentType string, isSettlement, hasCombinedTransaction 
 }
 
 // Convert HTML content to formatted text for thermal printer
-func convertHTMLToText(htmlContent string) string {
-	// This is a simple conversion - you might want to use a proper HTML parser
-	// For now, we'll create a well-formatted text version
-	
+func convertHTMLToText(receipt ReceiptData) string {
 	var builder strings.Builder
 	
 	// ESC/POS commands
@@ -597,33 +594,215 @@ func convertHTMLToText(htmlContent string) string {
 	// Reset printer
 	builder.WriteString(ESC + "@")
 	
-	// For simplicity, we'll extract the key information and format it nicely
-	// In a production environment, you might want to use a library like goquery
-	// to properly parse the HTML and extract formatting
-	
+	// Header - centered and bold
 	builder.WriteString(ESC + "a" + string(rune(1))) // Center alignment
-	builder.WriteString("RECEIPT\n")
+	builder.WriteString(ESC + "E" + string(rune(1))) // Bold on
+	
+	location := receipt.Location
+	if location == "" {
+		location = "Store"
+	}
+	builder.WriteString(fmt.Sprintf("%s\n", location))
+	builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
+
+	// Date - centered
+	date := receipt.Date
+	if date == "" {
+		date = time.Now().Format("2006-01-02 15:04:05")
+	}
+	// Remove seconds from date for cleaner look
+	if len(date) > 16 {
+		date = date[:16]
+	}
+	builder.WriteString(fmt.Sprintf("%s\n", date))
+
+	// Customer name if present
+	if receipt.CustomerName != "" {
+		builder.WriteString(fmt.Sprintf("Customer: %s\n", receipt.CustomerName))
+	}
+
 	builder.WriteString(ESC + "a" + string(rune(0))) // Left alignment
-	
 	builder.WriteString("================================\n")
-	builder.WriteString("Generated from HTML template\n")
-	builder.WriteString("================================\n\n")
+
+	// Transaction type indicators
+	if receipt.IsSettlement {
+		builder.WriteString("✓ Account Settlement Transaction\n")
+	} else if receipt.IsRetail {
+		builder.WriteString("✓ Retail Transaction\n")
+	} else if receipt.HasCombinedTransaction {
+		builder.WriteString("✓ Combined Retail & Settlement\n")
+	}
+
+	// Items section
+	builder.WriteString("\nITEMS\n")
+	for _, item := range receipt.Items {
+		itemTotal := float64(item.Quantity) * item.Price
+		
+		// Item name (bold)
+		builder.WriteString(ESC + "E" + string(rune(1)))
+		builder.WriteString(fmt.Sprintf("%s\n", item.Name))
+		builder.WriteString(ESC + "E" + string(rune(0)))
+		
+		// Quantity and price details with right alignment
+		builder.WriteString(fmt.Sprintf("  %d x $%.2f", item.Quantity, item.Price))
+		
+		// Right-align the total
+		totalStr := fmt.Sprintf("$%.2f", itemTotal)
+		padding := 32 - len(fmt.Sprintf("  %d x $%.2f", item.Quantity, item.Price)) - len(totalStr)
+		if padding > 0 {
+			builder.WriteString(strings.Repeat(" ", padding))
+		}
+		builder.WriteString(totalStr + "\n")
+		
+		// SKU on separate line
+		if item.SKU != "" {
+			builder.WriteString(fmt.Sprintf("  SKU: %s\n", item.SKU))
+		}
+		builder.WriteString("\n")
+	}
+
+	builder.WriteString("================================\n")
+
+	// Totals section with right alignment
+	builder.WriteString(formatReceiptLine("Subtotal:", fmt.Sprintf("$%.2f", receipt.Subtotal)))
+
+	// Discounts
+	if receipt.DiscountAmount > 0 {
+		discountText := "Discount:"
+		if receipt.DiscountPercentage > 0 {
+			discountText = fmt.Sprintf("Discount (%.0f%%):", receipt.DiscountPercentage)
+		}
+		builder.WriteString(formatReceiptLine(discountText, fmt.Sprintf("-$%.2f", receipt.DiscountAmount)))
+	}
+
+	if receipt.PromoAmount > 0 {
+		builder.WriteString(formatReceiptLine("Promo Discount:", fmt.Sprintf("-$%.2f", receipt.PromoAmount)))
+	}
+
+	builder.WriteString(formatReceiptLine("Tax:", fmt.Sprintf("$%.2f", receipt.Tax)))
+
+	// Tax breakdown
+	if !receipt.IsSettlement && !receipt.SkipTaxCalculation && !receipt.HasNoTax {
+		gst := receipt.Subtotal * 0.05
+		pst := receipt.Subtotal * 0.07
+		builder.WriteString(fmt.Sprintf("  GST (5%%): $%.2f\n", gst))
+		builder.WriteString(fmt.Sprintf("  PST (7%%): $%.2f\n", pst))
+	}
+
+	if receipt.Tip > 0 {
+		builder.WriteString(formatReceiptLine("Tip:", fmt.Sprintf("$%.2f", receipt.Tip)))
+	}
+
+	if receipt.SettlementAmount > 0 {
+		builder.WriteString(formatReceiptLine("Account Settlement:", fmt.Sprintf("$%.2f", receipt.SettlementAmount)))
+	}
+
+	// Total (bold and highlighted)
+	builder.WriteString("\n")
+	builder.WriteString(ESC + "E" + string(rune(1))) // Bold on
+	builder.WriteString(formatReceiptLine("TOTAL:", fmt.Sprintf("$%.2f", receipt.Total)))
+	builder.WriteString(ESC + "E" + string(rune(0))) // Bold off
+
+	builder.WriteString("================================\n")
+
+	// Payment Details section
+	builder.WriteString("\nPayment Details\n")
 	
-	builder.WriteString("Thank you for your purchase!\n\n")
-	
+	// Payment method with emoji
+	paymentEmoji := getPaymentEmoji(receipt.PaymentType)
+	paymentDisplay := formatPaymentType(receipt.PaymentType, receipt.IsSettlement, receipt.HasCombinedTransaction)
+	builder.WriteString(formatReceiptLine("Payment Method:", fmt.Sprintf("%s %s", paymentEmoji, paymentDisplay)))
+
+	// Card details if applicable
+	if strings.Contains(receipt.PaymentType, "credit") || strings.Contains(receipt.PaymentType, "debit") {
+		if receipt.CardDetails.CardBrand != "" || receipt.CardDetails.CardLast4 != "" {
+			cardText := "Card"
+			if receipt.CardDetails.CardBrand != "" {
+				cardText = strings.Title(receipt.CardDetails.CardBrand)
+			}
+			if receipt.CardDetails.CardLast4 != "" {
+				cardText += fmt.Sprintf(" ****%s", receipt.CardDetails.CardLast4)
+			}
+			builder.WriteString(formatReceiptLine("Card:", cardText))
+		}
+
+		if receipt.CardDetails.AuthCode != "" {
+			builder.WriteString(formatReceiptLine("Auth Code:", receipt.CardDetails.AuthCode))
+		}
+
+		if receipt.TerminalId != "" {
+			builder.WriteString(formatReceiptLine("Terminal ID:", receipt.TerminalId))
+		}
+	}
+
+	// Cash details
+	if receipt.PaymentType == "cash" && receipt.CashGiven > 0 {
+		builder.WriteString("\n")
+		builder.WriteString(formatReceiptLine("Cash:", fmt.Sprintf("$%.2f", receipt.CashGiven)))
+		builder.WriteString(formatReceiptLine("Change:", fmt.Sprintf("$%.2f", receipt.ChangeDue)))
+	}
+
+	// Account information
+	if receipt.AccountId != "" {
+		builder.WriteString("\nAccount Information\n")
+		builder.WriteString(formatReceiptLine("Account ID:", receipt.AccountId))
+		if receipt.AccountName != "" {
+			builder.WriteString(formatReceiptLine("Account Name:", receipt.AccountName))
+		}
+
+		if receipt.IsSettlement || receipt.HasCombinedTransaction {
+			builder.WriteString(formatReceiptLine("Previous Balance:", fmt.Sprintf("$%.2f", receipt.AccountBalanceBefore)))
+			
+			balanceText := fmt.Sprintf("$%.2f", receipt.AccountBalanceAfter)
+			if receipt.AccountBalanceAfter == 0 {
+				balanceText += " (Fully Settled)"
+			}
+			builder.WriteString(formatReceiptLine("New Balance:", balanceText))
+		}
+	}
+
+	// Refund if applicable
+	if receipt.RefundAmount > 0 {
+		builder.WriteString("\n")
+		builder.WriteString(formatReceiptLine("Refund:", fmt.Sprintf("$%.2f", receipt.RefundAmount)))
+	}
+
+	builder.WriteString("================================\n")
+
+	// Footer - centered
+	builder.WriteString(ESC + "a" + string(rune(1))) // Center alignment
+	builder.WriteString("\nThank you for your purchase!\n")
+	builder.WriteString(fmt.Sprintf("Visit us again at %s\n", location))
+	builder.WriteString(ESC + "a" + string(rune(0))) // Left alignment
+
+	// Transaction ID
+	builder.WriteString("\n")
+	builder.WriteString(ESC + "a" + string(rune(1))) // Center alignment
+	builder.WriteString(fmt.Sprintf("Transaction: %s\n", receipt.TransactionID))
+	builder.WriteString(ESC + "a" + string(rune(0))) // Left alignment
+
 	// Line feeds and cut
 	builder.WriteString(ESC + string(rune(100)) + string(rune(3))) // Feed 3 lines
 	builder.WriteString("\n\n\n")
 	builder.WriteString(GS + string(rune(86)) + string(rune(66)) + string(rune(0))) // Full cut
-	
+
 	return builder.String()
 }
 
+// Helper function to format receipt lines with proper spacing
+func formatReceiptLine(label, value string) string {
+	totalWidth := 32 // Standard thermal printer width
+	padding := totalWidth - len(label) - len(value)
+	if padding < 1 {
+		padding = 1
+	}
+	return label + strings.Repeat(" ", padding) + value + "\n"
+}
+
 // Send HTML to printer (convert to text or send as HTML if printer supports it)
-func sendToPrinter(htmlContent string, copies int) error {
-	// For now, we'll convert HTML to a simpler text format
-	// In production, you might want to use a HTML-to-image converter
-	textContent := convertHTMLToText(htmlContent)
+func sendToPrinter(htmlContent string, receipt ReceiptData, copies int) error {
+	// Convert the receipt data directly to formatted text
+	textContent := convertHTMLToText(receipt)
 	
 	for i := 1; i <= copies; i++ {
 		// Try to resolve printer name to IP if it's not an IP address
@@ -801,7 +980,7 @@ func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send to printer
-	err = sendToPrinter(htmlContent, receipt.Copies)
+	err = sendToPrinter(htmlContent, receipt, receipt.Copies)
 	if err != nil {
 		logMessage(fmt.Sprintf("❌ Print job failed: %v", err))
 		w.WriteHeader(http.StatusInternalServerError)
