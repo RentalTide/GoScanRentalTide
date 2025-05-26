@@ -814,10 +814,13 @@ func formatReceiptLine(label, value string) string {
 	return label + strings.Repeat(" ", padding) + value + "\n"
 }
 
-// Send formatted text to thermal printer
+// Send beautiful HTML to printer (or save as file)
 func sendToThermalPrinter(receipt ReceiptData, copies int) error {
-	// Generate the properly formatted text for thermal printer
-	textContent := convertHTMLToText(receipt)
+	// Generate the beautiful HTML receipt (same as preview)
+	htmlContent, err := renderHTMLReceipt(receipt)
+	if err != nil {
+		return fmt.Errorf("failed to render HTML receipt: %v", err)
+	}
 	
 	for i := 1; i <= copies; i++ {
 		// Try to resolve printer name to IP if it's not an IP address
@@ -837,16 +840,27 @@ func sendToThermalPrinter(receipt ReceiptData, copies int) error {
 		// Connect to printer
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", printerAddress, config.PrinterPort), 5*time.Second)
 		if err != nil {
-			return fmt.Errorf("failed to connect to printer: %v", err)
+			// If printer connection fails, save HTML to file instead
+			filename := fmt.Sprintf("receipt_%s_copy_%d.html", receipt.TransactionID, i)
+			err = os.WriteFile(filename, []byte(htmlContent), 0644)
+			if err != nil {
+				return fmt.Errorf("failed to connect to printer and save file: %v", err)
+			}
+			logMessage(fmt.Sprintf("✓ Copy %d saved as %s (printer unavailable)", i, filename))
+			continue
 		}
 		defer conn.Close()
 
 		// Set write timeout
 		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 
-		// Send formatted text to thermal printer
-		_, err = conn.Write([]byte(textContent))
+		// Send beautiful HTML to printer (for modern printers that support HTML)
+		_, err = conn.Write([]byte(htmlContent))
 		if err != nil {
+			// If sending HTML fails, save to file as backup
+			filename := fmt.Sprintf("receipt_%s_copy_%d.html", receipt.TransactionID, i)
+			os.WriteFile(filename, []byte(htmlContent), 0644)
+			logMessage(fmt.Sprintf("⚠️ Copy %d: printer failed, saved as %s", i, filename))
 			return fmt.Errorf("failed to send data to printer: %v", err)
 		}
 
