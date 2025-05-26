@@ -97,6 +97,36 @@ var funcMap = template.FuncMap{
 	"multiply": func(a int, b float64) float64 {
 		return float64(a) * b
 	},
+	"gt": func(a, b interface{}) bool {
+		// Convert to float64 for comparison
+		aVal := toFloat64(a)
+		bVal := toFloat64(b)
+		return aVal > bVal
+	},
+	"eq": func(a, b interface{}) bool {
+		// Convert to float64 for comparison
+		aVal := toFloat64(a)
+		bVal := toFloat64(b)
+		return aVal == bVal
+	},
+}
+
+// Helper function to convert interface{} to float64
+func toFloat64(val interface{}) float64 {
+	switch v := val.(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case int32:
+		return float64(v)
+	default:
+		return 0
+	}
 }
 
 // HTML Receipt Template - matches your React component exactly
@@ -362,14 +392,14 @@ const receiptTemplate = `
                 <span>${{printf "%.2f" .Subtotal}}</span>
             </div>
 
-            {{if gt .DiscountPercentage 0}}
+            {{if gt .DiscountPercentage 0.0}}
             <div class="total-line">
                 <span>Discount ({{printf "%.0f" .DiscountPercentage}}%):</span>
                 <span class="error-text">-${{printf "%.2f" .DiscountAmount}}</span>
             </div>
             {{end}}
 
-            {{if gt .PromoAmount 0}}
+            {{if gt .PromoAmount 0.0}}
             <div class="total-line">
                 <span>Promo Discount:</span>
                 <span class="error-text">-${{printf "%.2f" .PromoAmount}}</span>
@@ -389,14 +419,14 @@ const receiptTemplate = `
             </div>
             {{end}}
 
-            {{if gt .Tip 0}}
+            {{if gt .Tip 0.0}}
             <div class="total-line">
                 <span>Tip:</span>
                 <span>${{printf "%.2f" .Tip}}</span>
             </div>
             {{end}}
 
-            {{if gt .SettlementAmount 0}}
+            {{if gt .SettlementAmount 0.0}}
             <div class="total-line">
                 <span>Account Settlement:</span>
                 <span>${{printf "%.2f" .SettlementAmount}}</span>
@@ -445,7 +475,7 @@ const receiptTemplate = `
                 {{end}}
             {{end}}
 
-            {{if and (eq .PaymentType "cash") (gt .CashGiven 0)}}
+            {{if and (eq .PaymentType "cash") (gt .CashGiven 0.0)}}
             <div class="cash-details">
                 <div class="payment-line">
                     <span>Cash:</span>
