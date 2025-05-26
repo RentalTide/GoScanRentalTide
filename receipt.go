@@ -814,9 +814,9 @@ func formatReceiptLine(label, value string) string {
 	return label + strings.Repeat(" ", padding) + value + "\n"
 }
 
-// Send HTML to printer (convert to text or send as HTML if printer supports it)
-func sendToPrinter(htmlContent string, receipt ReceiptData, copies int) error {
-	// Convert the receipt data directly to formatted text
+// Send formatted text to thermal printer
+func sendToThermalPrinter(receipt ReceiptData, copies int) error {
+	// Generate the properly formatted text for thermal printer
 	textContent := convertHTMLToText(receipt)
 	
 	for i := 1; i <= copies; i++ {
@@ -844,7 +844,7 @@ func sendToPrinter(htmlContent string, receipt ReceiptData, copies int) error {
 		// Set write timeout
 		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 
-		// Send data
+		// Send formatted text to thermal printer
 		_, err = conn.Write([]byte(textContent))
 		if err != nil {
 			return fmt.Errorf("failed to send data to printer: %v", err)
@@ -913,7 +913,7 @@ func renderHTMLReceipt(receipt ReceiptData) (string, error) {
 	return buf.String(), nil
 }
 
-// Serve HTML receipt for preview
+// Serve HTML receipt for preview (POST endpoint)
 func handlePreviewReceipt(w http.ResponseWriter, r *http.Request) {
 	enableCORS(w)
 	
@@ -933,6 +933,59 @@ func handlePreviewReceipt(w http.ResponseWriter, r *http.Request) {
 	
 	// Render HTML
 	htmlContent, err := renderHTMLReceipt(receipt)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(fmt.Sprintf("Template error: %v", err)))
+		return
+	}
+	
+	// Serve HTML
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(htmlContent))
+}
+
+// Serve a test receipt for easy preview (GET endpoint)
+func handleTestReceipt(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w)
+	
+	// Create test receipt data
+	testReceipt := ReceiptData{
+		TransactionID:    "TEST-" + time.Now().Format("20060102-150405"),
+		Location:        "My Store",
+		Date:            time.Now().Format("2006-01-02 15:04:05"),
+		CustomerName:    "John Doe",
+		PaymentType:     "credit",
+		Subtotal:        20.00,
+		Tax:             2.60,
+		Tip:             3.00,
+		Total:           25.60,
+		IsRetail:        true,
+		SkipTaxCalculation: false,
+		HasNoTax:        false,
+		Items: []ReceiptItem{
+			{
+				Name:     "Premium Coffee",
+				Quantity: 2,
+				Price:    8.50,
+				SKU:      "COFFEE-001",
+			},
+			{
+				Name:     "Blueberry Muffin",
+				Quantity: 1,
+				Price:    3.00,
+				SKU:      "MUFFIN-002",
+			},
+		},
+		CardDetails: CardDetails{
+			CardBrand: "visa",
+			CardLast4: "1234",
+			AuthCode:  "ABC123",
+		},
+		TerminalId: "TERM001",
+	}
+	
+	// Render HTML
+	htmlContent, err := renderHTMLReceipt(testReceipt)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(fmt.Sprintf("Template error: %v", err)))
@@ -982,20 +1035,8 @@ func handlePrintReceipt(w http.ResponseWriter, r *http.Request) {
 		receipt.Copies = 1
 	}
 
-	// Render HTML receipt
-	htmlContent, err := renderHTMLReceipt(receipt)
-	if err != nil {
-		logMessage(fmt.Sprintf("❌ Template error: %v", err))
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(PrintResponse{
-			Success: false,
-			Message: fmt.Sprintf("Template error: %v", err),
-		})
-		return
-	}
-
-	// Send to printer
-	err = sendToPrinter(htmlContent, receipt, receipt.Copies)
+	// Send to thermal printer
+	err = sendToThermalPrinter(receipt, receipt.Copies)
 	if err != nil {
 		logMessage(fmt.Sprintf("❌ Print job failed: %v", err))
 		w.WriteHeader(http.StatusInternalServerError)
